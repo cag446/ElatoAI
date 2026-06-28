@@ -80,9 +80,10 @@ extern const uint16_t backend_port;
 extern const uint32_t SAMPLE_RATE;
 extern const uint32_t MIC_SAMPLE_RATE;
 
-extern const int BLUE_LED_PIN;
-extern const int RED_LED_PIN;
-extern const int GREEN_LED_PIN;
+// On-board WS2812 RGB LED of the ESP32-S3-Zero (Waveshare) is wired to GPIO21.
+extern const int RGB_LED_PIN;
+extern const int NUM_LEDS;
+extern const uint8_t LED_BRIGHTNESS; // 0-255 master brightness cap for the WS2812
 
 extern const gpio_num_t BUTTON_PIN;
 

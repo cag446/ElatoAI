@@ -1,15 +1,21 @@
 #include "LEDHandler.h"
+#include <Adafruit_NeoPixel.h>
+
+// Single on-board WS2812 of the ESP32-S3-Zero (GPIO21).
+// NEO_GRB + NEO_KHZ800 is the standard timing/order for the WS2812B.
+static Adafruit_NeoPixel rgbLed(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 int brightness = 0;
 int fadeAmount = 5;
 static unsigned long lastToggle = 0;
 static bool ledState = false;
 
+// Core helper: push an RGB color to the single addressable LED.
+// Values are 0-255 per channel; master brightness is capped in setupRGBLED().
 void setLEDColor(uint8_t r, uint8_t g, uint8_t b)
 {
-    analogWrite(RED_LED_PIN, r);
-    analogWrite(GREEN_LED_PIN, g);
-    analogWrite(BLUE_LED_PIN, b);
+    rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
+    rgbLed.show();
 }
 
 enum class StaticColor : uint8_t
@@ -22,72 +28,39 @@ enum class StaticColor : uint8_t
     CYAN,
 };
 
-struct RGB {
-    bool red;
-    bool green;
-    bool blue;
-};
-
 void setStaticColor(StaticColor color)
 {
-    RGB colorMap;
-
     switch (color)
     {
     case StaticColor::RED:
-        colorMap = {LOW, HIGH, HIGH};
+        setLEDColor(255, 0, 0);
         break;
     case StaticColor::GREEN:
-        colorMap = {HIGH, LOW, HIGH};
+        setLEDColor(0, 255, 0);
         break;
     case StaticColor::BLUE:
-        colorMap = {HIGH, HIGH, LOW};
+        setLEDColor(0, 0, 255);
         break;
     case StaticColor::YELLOW:
-        colorMap = {LOW, LOW, HIGH};
+        setLEDColor(255, 255, 0);
         break;
     case StaticColor::MAGENTA:
-        colorMap = {LOW, HIGH, LOW};
+        setLEDColor(255, 0, 255);
         break;
     case StaticColor::CYAN:
-        colorMap = {HIGH, LOW, LOW};
+        setLEDColor(0, 255, 255);
         break;
     default:
-        colorMap = {HIGH, HIGH, HIGH};
+        setLEDColor(255, 255, 255);
         break;
     }
-
-    digitalWrite(RED_LED_PIN, colorMap.red);
-    digitalWrite(GREEN_LED_PIN, colorMap.green);
-    digitalWrite(BLUE_LED_PIN, colorMap.blue);
-}
-
-void loopCyanPinkYellow()
-{
-    // Cyan (Green + Blue)
-    digitalWrite(RED_LED_PIN, LOW);
-    digitalWrite(GREEN_LED_PIN, HIGH);
-    digitalWrite(BLUE_LED_PIN, HIGH);
-    delay(500);
-
-    // Pink (Red + Blue)
-    digitalWrite(RED_LED_PIN, HIGH);
-    digitalWrite(GREEN_LED_PIN, LOW);
-    digitalWrite(BLUE_LED_PIN, HIGH);
-    delay(500);
-
-    // Yellow (Red + Green)
-    digitalWrite(RED_LED_PIN, HIGH);
-    digitalWrite(GREEN_LED_PIN, HIGH);
-    digitalWrite(BLUE_LED_PIN, LOW);
-    delay(500);
 }
 
 void pulseWhite()
 {
     setLEDColor(brightness, brightness, brightness);
     brightness += fadeAmount;
-    if (brightness <= 0 || brightness >= 255) // Changed from 255 to 128
+    if (brightness <= 0 || brightness >= 255)
     {
         fadeAmount = -fadeAmount;
     }
@@ -97,7 +70,7 @@ void pulseMagenta()
 {
     setLEDColor(brightness, 0, brightness);
     brightness += fadeAmount;
-    if (brightness <= 0 || brightness >= 255) // Changed from 255 to 128
+    if (brightness <= 0 || brightness >= 255)
     {
         fadeAmount = -fadeAmount;
     }
@@ -107,7 +80,7 @@ void pulseYellow()
 {
     setLEDColor(brightness, brightness, 0);
     brightness += fadeAmount;
-    if (brightness <= 0 || brightness >= 255) // Changed from 255 to 128
+    if (brightness <= 0 || brightness >= 255)
     {
         fadeAmount = -fadeAmount;
     }
@@ -117,7 +90,7 @@ void pulseBlue()
 {
     setLEDColor(0, 0, brightness);
     brightness += fadeAmount;
-    if (brightness <= 0 || brightness >= 255) // Changed from 255 to 128
+    if (brightness <= 0 || brightness >= 255)
     {
         fadeAmount = -fadeAmount;
     }
@@ -125,55 +98,56 @@ void pulseBlue()
 
 void blinkWhite()
 {
-    int out = ledState ? HIGH : LOW;
-    digitalWrite(RED_LED_PIN, out);
-    digitalWrite(GREEN_LED_PIN, out);
-    digitalWrite(BLUE_LED_PIN, out);
+    uint8_t v = ledState ? 255 : 0;
+    setLEDColor(v, v, v);
 }
 
 void blinkGreen()
 {
-    int out = ledState ? HIGH : LOW;
-    digitalWrite(BLUE_LED_PIN, LOW);
-    digitalWrite(RED_LED_PIN, LOW);   
-    digitalWrite(GREEN_LED_PIN, out);    
+    setLEDColor(0, ledState ? 255 : 0, 0);
 }
 
 void blinkYellow()
 {
-    int out = ledState ? HIGH : LOW;
-    digitalWrite(BLUE_LED_PIN, LOW);
-    digitalWrite(RED_LED_PIN, out);
-    digitalWrite(GREEN_LED_PIN, out);    
+    uint8_t v = ledState ? 255 : 0;
+    setLEDColor(v, v, 0);
+}
+
+void blinkBlue()
+{
+    setLEDColor(0, 0, ledState ? 255 : 0);
 }
 
 void turnOffLED()
 {
-    digitalWrite(RED_LED_PIN, LOW);
-    digitalWrite(GREEN_LED_PIN, LOW);
-    digitalWrite(BLUE_LED_PIN, LOW);
+    setLEDColor(0, 0, 0);
 }
 
 void turnOnLED()
 {
-    digitalWrite(RED_LED_PIN, HIGH);
-    digitalWrite(GREEN_LED_PIN, HIGH);
-    digitalWrite(BLUE_LED_PIN, HIGH);
+    setLEDColor(255, 255, 255);
+}
+
+void turnOnBlueLED()
+{
+    setLEDColor(0, 0, 255);
+}
+
+void turnOnRedLEDFlash()
+{
+    setLEDColor(255, 0, 0);
 }
 
 void setupRGBLED()
 {
-    pinMode(RED_LED_PIN, OUTPUT);
-    pinMode(GREEN_LED_PIN, OUTPUT);
-    pinMode(BLUE_LED_PIN, OUTPUT);
+    rgbLed.begin();
+    rgbLed.setBrightness(LED_BRIGHTNESS); // master cap so 255-per-channel isn't blinding
     turnOffLED(); // Turn off the LED initially
 }
 
 void blinkCyanPulse()
 {
-    analogWrite(GREEN_LED_PIN, brightness);
-    analogWrite(BLUE_LED_PIN, brightness);
-
+    setLEDColor(0, brightness, brightness);
     brightness += fadeAmount;
     if (brightness <= 0 || brightness >= 255)
     {
@@ -181,20 +155,9 @@ void blinkCyanPulse()
     }
 }
 
-
-void blinkBlue()
-{
-    int out = ledState ? HIGH : LOW;
-    digitalWrite(GREEN_LED_PIN, LOW);
-    digitalWrite(RED_LED_PIN, LOW);   
-    digitalWrite(BLUE_LED_PIN, out); 
-}
-
 void staticYellow()
 {
-    digitalWrite(BLUE_LED_PIN, LOW);
-    digitalWrite(RED_LED_PIN, HIGH);
-    digitalWrite(GREEN_LED_PIN, HIGH);
+    setLEDColor(255, 255, 0);
 }
 
 static const uint8_t colorSequence[][3] = {
@@ -208,25 +171,16 @@ static const int NUM_COLORS = sizeof(colorSequence) / sizeof(colorSequence[0]);
 void loopCyanPinkYellowPulse(unsigned long currentTime)
 {
     // Duration of each color fade
-    const unsigned long transitionDuration = 1000; // 500 ms per fade
+    const unsigned long transitionDuration = 1000; // ms per fade
 
-    // colorIndex = which color in colorSequence we’re currently *starting* from
     static int colorIndex = 0;
-
-    // We'll store the "start color" and "end color" for the current fade
     static uint8_t startColor[3];
     static uint8_t endColor[3];
-
-    // The timestamp at which the current fade *started*
     static unsigned long transitionStartTime = 0;
-
-    // A flag so we can initialize the first fade
     static bool initialized = false;
 
     if (!initialized)
     {
-        // On the very first call, set the starting color to colorSequence[0]
-        // and the endColor to the next color in the array
         memcpy(startColor, colorSequence[colorIndex], 3);
         int nextIndex = (colorIndex + 1) % NUM_COLORS;
         memcpy(endColor, colorSequence[nextIndex], 3);
@@ -235,35 +189,28 @@ void loopCyanPinkYellowPulse(unsigned long currentTime)
         initialized = true;
     }
 
-    // How long has this transition been running?
     unsigned long elapsed = currentTime - transitionStartTime;
     float t = (float)elapsed / (float)transitionDuration;
     if (t > 1.0f)
     {
-        t = 1.0f; // clamp
+        t = 1.0f;
     }
 
-    // Interpolate each channel: R, G, B
     uint8_t r = startColor[0] + (endColor[0] - startColor[0]) * t;
     uint8_t g = startColor[1] + (endColor[1] - startColor[1]) * t;
     uint8_t b = startColor[2] + (endColor[2] - startColor[2]) * t;
 
-    // Write these values to your LED pins
-    analogWrite(RED_LED_PIN, r);
-    analogWrite(GREEN_LED_PIN, g);
-    analogWrite(BLUE_LED_PIN, b);
+    setLEDColor(r, g, b);
 
-    // Check if this transition has finished
     if (elapsed >= transitionDuration)
     {
-        // Move to next color in the sequence
         colorIndex = (colorIndex + 1) % NUM_COLORS;
-        memcpy(startColor, endColor, 3); // old 'end' becomes new 'start'
+        memcpy(startColor, endColor, 3);
 
         int nextIndex = (colorIndex + 1) % NUM_COLORS;
         memcpy(endColor, colorSequence[nextIndex], 3);
 
-        transitionStartTime = currentTime; // reset the clock for the next fade
+        transitionStartTime = currentTime;
     }
 }
 
@@ -308,6 +255,6 @@ void ledTask(void *parameter)
         }
 
         // Delay for smoother LED transitions
-        vTaskDelay(20 / portTICK_PERIOD_MS); // Approximate the delay from the original `pulsateLED()`
+        vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }

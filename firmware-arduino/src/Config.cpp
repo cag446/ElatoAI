@@ -95,9 +95,12 @@ const uint32_t MIC_SAMPLE_RATE = 16000;
 const i2s_port_t I2S_PORT_IN = I2S_NUM_1;
 const i2s_port_t I2S_PORT_OUT = I2S_NUM_0;
 
-const int BLUE_LED_PIN = 13;
-const int RED_LED_PIN = 9;
-const int GREEN_LED_PIN = 8;
+// ----------------- On-board RGB LED (WS2812) -----------------
+// The ESP32-S3-Zero (Waveshare) has a single addressable WS2812 LED on GPIO21.
+// We no longer drive 3 separate analog R/G/B pins.
+const int RGB_LED_PIN = 21;
+const int NUM_LEDS = 1;
+const uint8_t LED_BRIGHTNESS = 50; // keep it dim; the WS2812 is very bright at 255
 
 const int I2S_SD = 14;
 const int I2S_WS = 4;
