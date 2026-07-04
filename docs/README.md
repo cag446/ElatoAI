@@ -11,6 +11,7 @@ para imprimir/compartir).
 | Documento | Descripcion | Markdown | PDF |
 |---|---|---|---|
 | **Port al ESP32-S3 Zero** | Adaptacion de hardware: LED WS2812 (GPIO21), boton tactil (GPIO2), tabla de particiones de 4 MB, `platformio.ini`, mapa de pines y **diagrama de conexionado**. | [port-esp32-s3-zero.md](port-esp32-s3-zero.md) | [port-esp32-s3-zero.pdf](port-esp32-s3-zero.pdf) |
+| **Etapa 1: probar con la nube de Elato** | Receta paso a paso para registrar la MAC y dejar la placa hablando con el servidor gratuito de Elato (validar el hardware). | [etapa-1-elato-cloud.md](etapa-1-elato-cloud.md) | [etapa-1-elato-cloud.pdf](etapa-1-elato-cloud.pdf) |
 | **Registro del dispositivo y backend** | Logica de servidor: los 3 componentes (frontend/Supabase, servidor edge, ESP32), alta de la MAC, flujo del token JWT y modos `DEV`/`PROD`/`ELATO`. | [registro-dispositivo-backend.md](registro-dispositivo-backend.md) | [registro-dispositivo-backend.pdf](registro-dispositivo-backend.pdf) |
 
 ## Por donde empezar
