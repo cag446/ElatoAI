@@ -43,7 +43,7 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
   3V3 ──┤ 3V3                       │
         │                     GPIO1 ├──► SCK   ┐
         │                     GPIO4 ├──► WS    │  INMP441
-        │                    GPIO14 ├──► SD    │  (microfono)
+        │                     GPIO8 ├──► SD    │  (microfono)
         │                       GND ├──► GND / VDD=3V3 / L/R=GND ┘
         │                          │
         │                     GPIO5 ├──► LRC   ┐
@@ -67,7 +67,7 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
    ┌─────────────┐
    │ VDD ────────┼──────────────► 3V3      (¡3.3 V, NO 5 V!)
    │ GND ────────┼──────────────► GND
-   │ SD  ────────┼──────────────► GPIO14
+   │ SD  ────────┼──────────────► GPIO8    (movido de GPIO14, ver nota)
    │ L/R ────────┼──────────────► GND      (selecciona canal izquierdo)
    │ WS  ────────┼──────────────► GPIO4
    │ SCK ────────┼──────────────► GPIO1
@@ -78,10 +78,14 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
 |---|---|---|
 | VDD | 3V3 | Alimentacion 3.3 V |
 | GND | GND | Comun |
-| SD | GPIO14 | Datos I2S (salida del micro) |
+| SD | GPIO8 | Datos I2S (salida del micro). Antes GPIO14 |
 | L/R | GND | A GND = canal izquierdo (el que espera el firmware) |
 | WS | GPIO4 | Word Select / LRCLK |
 | SCK | GPIO1 | Reloj de bits / BCLK |
+
+> **NOTA:** El pin **SD** va a **GPIO8**, no a GPIO14. En el ESP32-S3 Zero,
+> GPIO14 esta en los pads de la **cara inferior** (paso 2.00 mm) y no llega a la
+> protoboard; GPIO8 esta en la fila lateral (2.54 mm). El firmware ya usa GPIO8.
 
 > **TIP:** Si el micro no capta o capta muy bajo, revisa que **L/R este a GND**.
 > Si lo dejas al aire o a 3.3 V, el micro habla en el canal contrario y el
@@ -193,7 +197,7 @@ amarillo=escucha, rojo=piensa, azul=responde, cian=OTA).
 | INMP441 | VDD | 3V3 |
 | INMP441 | GND | GND |
 | INMP441 | L/R | GND |
-| INMP441 | SD | GPIO14 |
+| INMP441 | SD | GPIO8 |
 | INMP441 | WS | GPIO4 |
 | INMP441 | SCK | GPIO1 |
 | MAX98357A | Vin | 5V |
@@ -229,7 +233,7 @@ INMP441 (micro, 3.3V)     MAX98357A (amp, 5V) + altavoz 8Ω
   VDD -> 3V3                Vin  -> 5V
   GND -> GND                GND  -> GND
   L/R -> GND                SD   -> GPIO10
-  SD  -> GPIO14             DIN  -> GPIO7
+  SD  -> GPIO8              DIN  -> GPIO7
   WS  -> GPIO4              BCLK -> GPIO6
   SCK -> GPIO1              LRC  -> GPIO5
                            GAIN -> (libre = 9 dB)

@@ -102,7 +102,9 @@ const int RGB_LED_PIN = 21;
 const int NUM_LEDS = 1;
 const uint8_t LED_BRIGHTNESS = 50; // keep it dim; the WS2812 is very bright at 255
 
-const int I2S_SD = 14;
+const int I2S_SD = 8;  // mic data. Movido de GPIO14: ese pad esta en la cara inferior
+                       // (2.00mm) del ESP32-S3 Zero y no llega a protoboard. GPIO8 esta
+                       // en la fila lateral (2.54mm).
 const int I2S_WS = 4;
 const int I2S_SCK = 1;
 

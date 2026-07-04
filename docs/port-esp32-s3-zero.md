@@ -245,7 +245,7 @@ build_flags =
 |---|---|---|
 | LED RGB integrado | WS2812 (DIN) | 21 |
 | Boton tactil | Touch (TOUCH2) | 2 |
-| Microfono I2S | SD / DOUT | 14 |
+| Microfono I2S | SD / DOUT | 8 |
 | Microfono I2S | WS / LRCLK | 4 |
 | Microfono I2S | SCK / BCLK | 1 |
 | Altavoz I2S | WS / LRCLK | 5 |
@@ -253,9 +253,10 @@ build_flags =
 | Altavoz I2S | DATA / DIN | 7 |
 | Altavoz I2S | SD (shutdown) | 10 |
 
-> **NOTA:** Todos los pines I2S caen en el rango GPIO 1-14, que el Zero expone en
-> sus cabeceras. Los antiguos pines del LED (8, 9, 13) quedan **libres** para
-> otros usos.
+> **NOTA:** Todos los pines usados estan en las **filas laterales de 2.54 mm**
+> (aptas para protoboard): GPIO 1-13. El SD del microfono se movio de GPIO14 a
+> **GPIO8** porque GPIO14 esta en los pads inferiores (2.00 mm) que no llegan a
+> protoboard. Quedan libres en las filas laterales: GPIO 3, 9, 11, 12, 13.
 
 ### Diagrama de conexionado
 
@@ -269,7 +270,7 @@ en la placa** (GPIO21), no hay que cablearlo. El microfono usa un modulo I2S
                      │                                │
    MICROFONO I2S     │  GPIO1  ◄────── SCK / BCLK     │
   ┌──────────────┐   │  GPIO4  ◄────── WS  / LRCLK    │
-  │ INMP441      │   │  GPIO14 ──────► SD  / DOUT     │
+  │ INMP441      │   │  GPIO8  ──────► SD  / DOUT     │
   │  SCK ───────────►│                                │
   │  WS  ───────────►│  GPIO5  ──────► WS  / LRCLK    │   ALTAVOZ I2S
   │  SD  ───────────►│  GPIO6  ──────► BCK / BCLK    ┌┼──────────────┐
@@ -291,7 +292,7 @@ Resumen de conexiones (una fila por cable):
 |---|---|---|
 | Microfono I2S | SCK / BCLK | GPIO1 |
 | Microfono I2S | WS / LRCLK | GPIO4 |
-| Microfono I2S | SD / DOUT | GPIO14 |
+| Microfono I2S | SD / DOUT | GPIO8 |
 | Microfono I2S | VDD / GND | 3V3 / GND |
 | Amplificador I2S | LRC / WS | GPIO5 |
 | Amplificador I2S | BCLK | GPIO6 |
@@ -380,9 +381,9 @@ PLACA:  Waveshare ESP32-S3 Zero (ESP32-S3FH4R2)
 PINES CLAVE
   WS2812 (LED)     GPIO21
   Touch            GPIO2  (TOUCH_PAD_NUM2)
-  Mic  I2S         SD=14  WS=4   SCK=1
+  Mic  I2S         SD=8   WS=4   SCK=1   (SD movido de GPIO14: pad inferior)
   Spk  I2S         WS=5   BCK=6  DATA=7  SD=10
-  Libres tras port GPIO 8, 9, 13 (antiguo LED RGB)
+  Libres (protoboard) GPIO 3, 9, 11, 12, 13
 
 ARCHIVOS DEL PORT
   platformio.ini   env esp32-s3-zero · flash 4MB · PSRAM quad · USB-CDC · NeoPixel
