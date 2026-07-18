@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.elato.hermes-bridge</string>
+
+  <!-- AJUSTAR: rutas absolutas del venv y del repo en tu Mac mini -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/TU_USUARIO/ElatoAI/server/hermes-bridge/.venv/bin/python3</string>
+    <string>/Users/TU_USUARIO/ElatoAI/server/hermes-bridge/bridge.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- AJUSTAR: la API key configurada en ~/.hermes/.env (API_SERVER_KEY) -->
+    <key>HERMES_API_KEY</key>
+    <string>change-me-local-dev</string>
+    <key>PIPER_VOICE</key>
+    <string>/Users/TU_USUARIO/piper-voices/es_ES-davefx-medium.onnx</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/hermes-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/hermes-bridge.err</string>
+</dict>
+</plist>

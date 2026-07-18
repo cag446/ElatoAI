@@ -12,16 +12,18 @@
 // Pick one of the following (DEV_MODE, PROD_MODE, ELATO_MODE) , comment the rest
 // For ELATO_MODE, you will need to register your DIY Hardware on the Elato website
 
-// #define DEV_MODE
+// DEV_MODE + VOICE_SERVER_DENO = puente Hermes local (ws://IP:8000/, token http://IP:3000)
+// ELATO_MODE + VOICE_SERVER_CLOUDFLARE = nube de Elato (config anterior, ver runbook para volver)
+#define DEV_MODE
 // #define PROD_MODE
-#define ELATO_MODE
+// #define ELATO_MODE
 
 // ---------- CHOOSE YOUR VOICE SERVER ----------
 // Keep this separate from DEV/PROD/ELATO so the deployment mode and the voice backend stay independent.
 // Pick one backend for websocket voice traffic.
 
-// #define VOICE_SERVER_DENO
-#define VOICE_SERVER_CLOUDFLARE
+#define VOICE_SERVER_DENO
+// #define VOICE_SERVER_CLOUDFLARE
 
 
 // ---------- CHOOSE YOUR INPUT MODE ----------

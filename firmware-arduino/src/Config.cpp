@@ -40,7 +40,8 @@ volatile bool sleepRequested = false;
  */
 
 #ifdef DEV_MODE
-const char *ws_server = "192.168.1.33";
+// AJUSTAR: IP de la Mac mini que corre el puente Hermes (server/hermes-bridge)
+const char *ws_server = "192.168.1.50";
 const char *ws_path = "/";
 
 #if defined(VOICE_SERVER_DENO)
@@ -49,8 +50,8 @@ const uint16_t ws_port = 8000;
 const uint16_t ws_port = 8787;
 #endif
 
-// Backend server details 
-const char *backend_server = "192.168.1.33";
+// Backend server details (mismo puente: endpoint del token en :3000)
+const char *backend_server = "192.168.1.50";
 const uint16_t backend_port = 3000;
 
 #elif defined(PROD_MODE)
@@ -244,5 +245,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 #endif
+
+#else
+// DEV_MODE: todo va por HTTP/WS sin TLS; los certificados no se usan pero
+// FactoryReset.h referencia Vercel_CA_cert, asi que deben existir para el linker.
+const char *Vercel_CA_cert = "";
+const char *CA_cert = "";
 
 #endif

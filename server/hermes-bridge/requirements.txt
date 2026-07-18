@@ -1,0 +1,8 @@
+# Puente ElatoAI <-> Hermes (corre en la Mac mini)
+# Requiere ademas: brew install opus  (libopus para opuslib)
+aiohttp>=3.9
+numpy>=1.26
+opuslib>=3.0.1
+webrtcvad-wheels>=2.0.14
+faster-whisper>=1.0
+piper-tts>=1.2

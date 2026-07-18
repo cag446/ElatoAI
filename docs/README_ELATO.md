@@ -15,6 +15,8 @@ para imprimir/compartir).
 | **Etapa 1: probar con la nube de Elato** | Receta paso a paso para registrar la MAC y dejar la placa hablando con el servidor gratuito de Elato (validar el hardware). | [etapa-1-elato-cloud.md](etapa-1-elato-cloud.md) | [etapa-1-elato-cloud.pdf](etapa-1-elato-cloud.pdf) |
 | **Registro del dispositivo y backend** | Logica de servidor: los 3 componentes (frontend/Supabase, servidor edge, ESP32), alta de la MAC, flujo del token JWT y modos `DEV`/`PROD`/`ELATO`. | [registro-dispositivo-backend.md](registro-dispositivo-backend.md) | [registro-dispositivo-backend.pdf](registro-dispositivo-backend.pdf) |
 | **Firmware, binarios y flasheo** | Que es cada binario (bootloader/particiones/app), offsets, `firmware.bin` vs binario **merged**, como flashear y respaldos. | [firmware-binarios-y-flasheo.md](firmware-binarios-y-flasheo.md) | [firmware-binarios-y-flasheo.pdf](firmware-binarios-y-flasheo.pdf) |
+| **Propuesta: integracion Hermes** | Diseño y contexto del puente local ESP32 ↔ agente Hermes (Mac mini): hechos verificados del protocolo con referencias archivo:linea, arquitectura, decisiones y riesgos. | [propuesta-hermes-bridge.md](propuesta-hermes-bridge.md) | [propuesta-hermes-bridge.pdf](propuesta-hermes-bridge.pdf) |
+| **Runbook: puente Hermes** | Instalacion paso a paso ejecutable por cualquier agente: API de Hermes, puente en la Mac mini (launchd), voz Piper, cambio de firmware a `DEV_MODE`, verificacion y rollback. | [runbook-hermes-bridge.md](runbook-hermes-bridge.md) | [runbook-hermes-bridge.pdf](runbook-hermes-bridge.pdf) |
 
 ## Por donde empezar
 
@@ -22,6 +24,8 @@ para imprimir/compartir).
    (conexionado, compilacion y carga del firmware).
 2. **Conectar el dispositivo a la nube** → continua con *Registro del
    dispositivo y backend* (alta de la MAC, credenciales y eleccion de modo).
+3. **Usarlo con el agente Hermes local** → lee la *Propuesta: integracion
+   Hermes* y aplica el *Runbook: puente Hermes*.
 
 ## Regenerar los PDF
 
