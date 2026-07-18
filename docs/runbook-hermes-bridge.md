@@ -82,8 +82,9 @@ curl http://localhost:8642/v1/chat/completions \
 
 ## Paso 2 — Fijar la IP de la Mac mini
 
-El firmware apunta a una IP fija. Reservar la IP de la Mac mini en el router
-(reserva DHCP) para que nunca cambie. Anotarla; se usa en los pasos 6 y 7.
+El firmware apunta a una IP fija: **192.168.100.23** (ya configurada en
+`Config.cpp`). Reservar esa IP para la Mac mini en el router (reserva DHCP)
+para que nunca cambie.
 
 ```bash
 # En la Mac mini, para conocer la IP actual:
@@ -138,7 +139,7 @@ Salida esperada (la primera vez tarda: descarga el modelo Whisper):
 Verificar el endpoint del token desde otra maquina de la LAN:
 
 ```bash
-curl "http://<IP-mac-mini>:3000/api/generate_auth_token?macAddress=TEST"
+curl "http://192.168.100.23:3000/api/generate_auth_token?macAddress=TEST"
 # esperado: {"token": "elato-local-token"}
 ```
 
@@ -159,14 +160,15 @@ curl "http://<IP-mac-mini>:3000/api/generate_auth_token?macAddress=TEST"
 
 ## Paso 6 — Firmware: IP y flasheo
 
-El firmware ya esta en `DEV_MODE` + `VOICE_SERVER_DENO`. Solo falta poner la
-IP real de la Mac mini (paso 2) en **dos lineas** de
-`firmware-arduino/src/Config.cpp` (bloque `#ifdef DEV_MODE`, ~lineas 43 y 54):
+El firmware ya esta en `DEV_MODE` + `VOICE_SERVER_DENO` con la IP real de la
+Mac mini (`192.168.100.23`) en `firmware-arduino/src/Config.cpp` (bloque
+`#ifdef DEV_MODE`, ~lineas 43 y 54). Si esa IP cambiara algun dia, son estas
+dos lineas:
 
 ```cpp
-const char *ws_server = "192.168.1.50";      // <- IP de la Mac mini
+const char *ws_server = "192.168.100.23";      // <- IP de la Mac mini
 ...
-const char *backend_server = "192.168.1.50"; // <- la misma IP
+const char *backend_server = "192.168.100.23"; // <- la misma IP
 ```
 
 Compilar y flashear (el Zero necesita `--no-stub`, ya configurado; detalles en

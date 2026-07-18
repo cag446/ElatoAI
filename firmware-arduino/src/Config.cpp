@@ -40,8 +40,8 @@ volatile bool sleepRequested = false;
  */
 
 #ifdef DEV_MODE
-// AJUSTAR: IP de la Mac mini que corre el puente Hermes (server/hermes-bridge)
-const char *ws_server = "192.168.1.50";
+// IP de la Mac mini que corre el puente Hermes (server/hermes-bridge)
+const char *ws_server = "192.168.100.23";
 const char *ws_path = "/";
 
 #if defined(VOICE_SERVER_DENO)
@@ -51,7 +51,7 @@ const uint16_t ws_port = 8787;
 #endif
 
 // Backend server details (mismo puente: endpoint del token en :3000)
-const char *backend_server = "192.168.1.50";
+const char *backend_server = "192.168.100.23";
 const uint16_t backend_port = 3000;
 
 #elif defined(PROD_MODE)
