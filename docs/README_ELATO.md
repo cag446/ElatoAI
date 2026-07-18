@@ -6,6 +6,9 @@ Indice de la documentacion tecnica del port de ElatoAI a la placa
 Cada documento esta disponible en **Markdown** (editable) y **PDF** (estilizado
 para imprimir/compartir).
 
+> Para operar este hardware con el **agente Hermes local** (sin nube de Elato),
+> ver [README_HERMES.md](README_HERMES.md).
+
 ## Documentos
 
 | Documento | Descripcion | Markdown | PDF |
