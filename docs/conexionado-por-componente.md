@@ -9,12 +9,12 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
 
 - Microfono **INMP441** (I2S MEMS)
 - Amplificador **MAX98357A** (I2S) + **altavoz de 8 Ω**
-- **Boton tactil** (en vez de pulsador mecanico)
+- **Boton fisico KY-004** (en GPIO2; el touch capacitivo se descarto por no fiable)
 - LED **WS2812 integrado** (en vez de LED RGB de 3 pines)
 
 > **NOTA:** Respecto al diagrama oficial del proyecto (`assets/pcb-design.png`),
 > tu montaje cambia dos cosas y **ambas quitan cableado**: no cableas el LED RGB
-> (usas el WS2812 de la placa) ni el pulsador (usas un cable tactil). El micro,
+> (usas el WS2812 de la placa) ni el LED RGB de 3 pines. El micro,
 > el amplificador y el altavoz se conectan igual que en el diagrama oficial.
 
 ---
@@ -53,7 +53,7 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
    5V ──┤ 5V ──────────────────────┼──► Vin   │
         │                       GND ├──► GND   ┘
         │                          │
-        │                     GPIO2 ├──► cable tactil (superficie conductora)
+        │                     GPIO2 ├──► OUT del boton KY-004 (VCC=3V3, GND=GND)
         │                    GPIO21 ├── WS2812 integrado (no cablear)
         └──────────────────────────┘
 ```
@@ -135,29 +135,43 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
 
 ---
 
-## 3. Boton tactil (GPIO2)
+## 3. Boton fisico (GPIO2) — modulo KY-004
 
-En tu variante no hay pulsador: un **cable** desde GPIO2 hasta cualquier
-superficie conductora hace de sensor tactil capacitivo.
+El **touch capacitivo se descarto**: en el ESP32-S3 Zero sobre protoboard
+`touchRead()` devolvia un valor congelado (~3.1M, sin responder al tacto). Se usa
+un **boton fisico** (modulo **KY-004**, 3 pines con pull-up integrado). El
+firmware esta en modo boton (`TOUCH_MODE` desactivado en `Config.h`).
 
 ```flowchart
-   ESP32-S3 Zero           Superficie tactil
-   ┌───────────┐
-   │     GPIO2 ├─────────► cable ──► lamina/tornillo/papel aluminio/
-   └───────────┘                     pista de cobre... (lo que toques)
-
-   (NO lleva resistencia ni GND: el touch es capacitivo interno del ESP32)
+   KY-004 (boton)                  ESP32-S3 Zero
+   ┌─────────────┐
+   │ VCC ────────┼──────────────► 3V3   (¡3.3 V, NO 5 V!)
+   │ OUT ────────┼──────────────► GPIO2
+   │ GND ────────┼──────────────► GND
+   └─────────────┘
+   (el KY-004 ya trae su resistencia; no anadir pull-up externo)
 ```
 
-| Conexion | Detalle |
-|---|---|
-| GPIO2 → superficie | Un solo cable a algo conductor que vayas a tocar |
-| Resistencia | Ninguna |
-| GND | No se conecta |
+| Pin KY-004 | Va a | Nota |
+|---|---|---|
+| VCC | 3V3 | Alimentacion 3.3 V (para que OUT de 3.3 V, compatible con el GPIO) |
+| OUT | GPIO2 | Señal del boton |
+| GND | GND | Comun |
 
-> **TIP:** Cuanto mas grande la superficie, mas sensible. Si dispara solo o no
-> responde, calibra `TOUCH_THRESHOLD` con `test/touch_test.cpp` (ver doc del port).
-> Recuerda: toque de ~0.5 s duerme la placa; un toque la despierta.
+| Accion | Efecto |
+|---|---|
+| Mantener pulsado ~0.5 s y soltar | Duerme la placa |
+| Doble clic | Duerme la placa |
+| Una pulsacion (dormida) | Despierta la placa |
+
+> **ADVERTENCIA:** Alimenta **VCC a 3V3**, nunca a 5 V (el nivel de OUT debe ser
+> 3.3 V para el GPIO del ESP32). Sin VCC conectado, GPIO2 queda en LOW fijo y el
+> boton no responde (fue el fallo detectado en las pruebas).
+
+> **NOTA (polaridad):** El firmware espera boton **activo-LOW** (reposo HIGH,
+> pulsado LOW). Si tu KY-004 fuera de la variante invertida (pull-down, reposo
+> LOW) y no responde, hay que cambiar `esp_sleep_enable_ext0_wakeup(BUTTON_PIN,
+> LOW)` a `HIGH` y ajustar el `Button(...)` en `main.cpp`.
 
 ---
 
@@ -207,7 +221,9 @@ amarillo=escucha, rojo=piensa, azul=responde, cian=OTA).
 | MAX98357A | BCLK | GPIO6 |
 | MAX98357A | LRC | GPIO5 |
 | MAX98357A | + / − | Altavoz 8 Ω |
-| Superficie tactil | cable | GPIO2 |
+| Boton KY-004 | VCC | 3V3 |
+| Boton KY-004 | OUT | GPIO2 |
+| Boton KY-004 | GND | GND |
 | WS2812 | (integrado) | GPIO21 (no cablear) |
 
 ---
@@ -221,7 +237,8 @@ amarillo=escucha, rojo=piensa, azul=responde, cian=OTA).
 | Sonido distorsionado | Ganancia muy alta o altavoz suelto | Deja `GAIN` sin conectar; fija bien el altavoz |
 | El micro no capta | `L/R` no esta a GND | Conecta `L/R` del INMP441 a GND |
 | Micro con ruido | Cables largos de I2S o sin GND comun | Cables cortos; comparte GND con la placa |
-| El touch no va | Umbral mal / superficie pequeña | Calibra `TOUCH_THRESHOLD`; agranda la superficie |
+| El boton no responde | VCC del KY-004 sin 3V3 (GPIO2 queda en LOW) | Conecta VCC a 3V3; revisa OUT→GPIO2 |
+| El boton no responde aun con VCC | Polaridad invertida del KY-004 | Cambiar wakeup a activo-HIGH en `main.cpp` (ver seccion 3) |
 | Se resetea al subir volumen | Fuente insuficiente | Fuente de 5 V con >0.5 A de pico |
 
 ---
@@ -239,7 +256,7 @@ INMP441 (micro, 3.3V)     MAX98357A (amp, 5V) + altavoz 8Ω
                            GAIN -> (libre = 9 dB)
                            +/-  -> altavoz 8Ω
 
-TOUCH:  GPIO2 -> superficie conductora (1 cable)
+BOTON KY-004:  VCC->3V3  OUT->GPIO2  GND->GND  (pull-up integrado)
 LED:    WS2812 integrado en GPIO21 (no cablear)
 
 ALIMENTACION:  3V3->micro | 5V->amp | GND comun (incluye L/R del micro)

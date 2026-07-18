@@ -11,7 +11,14 @@ solicitadas:
 
 1. **LED RGB integrado WS2812** del propio Zero (en GPIO21) en lugar del LED RGB
    de 3 pines analogicos (anodo comun) del proyecto original.
-2. **Boton tactil** (touch) en lugar del interruptor / pulsador mecanico.
+2. **Boton** en GPIO2 en lugar del interruptor original.
+
+> **ACTUALIZACION:** Este documento describe el port inicial, en el que se probo
+> el **touch capacitivo** (GPIO2). En la practica el touch resulto **no fiable en
+> el Zero sobre protoboard** (`touchRead()` daba un valor congelado ~3.1M) y se
+> cambio a un **boton fisico KY-004** (`TOUCH_MODE` desactivado). Para el
+> conexionado del boton ver [[conexionado-por-componente]] y para los binarios y
+> el flasheo ver [[firmware-binarios-y-flasheo]].
 
 La placa es una **ESP32-S3FH4R2**: doble nucleo Xtensa LX7 a 240 MHz, **4 MB de
 flash** y **2 MB de PSRAM (quad/QSPI)**, WiFi + BLE5, y **solo USB-C nativo**
