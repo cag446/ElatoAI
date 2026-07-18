@@ -19,6 +19,12 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
 
 ---
 
+## Tabla visual de conexionado
+
+![Conexionado ESP32-S3 Zero](conexionado-esp32-s3-zero.png)
+
+---
+
 ## Componentes y alimentacion
 
 | Componente | Modelo | Alimentacion |
