@@ -3,6 +3,7 @@
 #include "OTA.h"
 #include "WifiManager.h"
 #include <driver/touch_sensor.h>
+#include "Button.h" // physical button mode (when TOUCH_MODE is disabled)
 
 #define TOUCH_THRESHOLD 28000
 #define REQUIRED_RELEASE_CHECKS                                                \

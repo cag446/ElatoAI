@@ -27,7 +27,11 @@
 // ---------- CHOOSE YOUR INPUT MODE ----------
 // If you want to use the touch sensor to wake up the device, uncomment the following line
 // If you want to use the button to wake up the device, comment the following line
-#define TOUCH_MODE
+// NOTE (ESP32-S3 Zero): using a physical BUTTON on GPIO2 (touch disabled).
+// The capacitive touch read on the Zero returned a frozen value on a breadboard
+// (~3.1M, unresponsive), so the touch path is not used. If you re-enable touch,
+// recalibrate TOUCH_THRESHOLD in main.cpp to your build's real idle value.
+// #define TOUCH_MODE
 
 extern Preferences preferences;
 extern bool factory_reset_status;
