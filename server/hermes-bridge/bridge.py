@@ -53,9 +53,9 @@ HERMES_URL = os.environ.get(
     "HERMES_URL", "http://127.0.0.1:8642/v1/chat/completions")
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 HERMES_MODEL = os.environ.get("HERMES_MODEL", "hermes-agent")
-HERMES_TIMEOUT_S = float(os.environ.get("HERMES_TIMEOUT_S", "120"))
+HERMES_TIMEOUT_S = float(os.environ.get("HERMES_TIMEOUT_S", "60"))
 
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 LANGUAGE = os.environ.get("BRIDGE_LANGUAGE", "es")
 
 PIPER_BIN = os.environ.get("PIPER_BIN", "piper")
@@ -255,7 +255,9 @@ class Session:
         await self.send_state("AUDIO.COMMITTED")
 
         try:
+            t0 = time.monotonic()
             text = await loop.run_in_executor(None, transcribe, pcm)
+            t_stt = time.monotonic() - t0
             if not text:
                 log.info("Empty transcription, back to listening.")
                 await self.send_state("RESPONSE.COMPLETE")
@@ -265,14 +267,22 @@ class Session:
             self.history.append({"role": "user", "content": text})
             self.history = self.history[-MAX_HISTORY:]
 
+            t1 = time.monotonic()
             reply = await ask_hermes(self.http, self.history)
+            t_llm = time.monotonic() - t1
             self.history.append({"role": "assistant", "content": reply})
             log.info("Hermes: %s", reply)
 
+            t2 = time.monotonic()
             src_rate = piper_sample_rate()
             raw = await loop.run_in_executor(None, synthesize, reply)
             pcm24 = resample_to_24k(raw, src_rate)
             packets = encode_opus_packets(pcm24)
+            t_tts = time.monotonic() - t2
+
+            t_total = time.monotonic() - t0
+            log.info("Tiempos — STT: %.2fs  LLM: %.2fs  TTS: %.2fs  TOTAL: %.2fs",
+                     t_stt, t_llm, t_tts, t_total)
 
             # Device -> SPEAKING (blue LED), then paced Opus stream
             await self.send_state("RESPONSE.CREATED")
