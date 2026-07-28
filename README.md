@@ -189,6 +189,22 @@ graph TD
 - Edge server stops when wall clock time is exceeded
 - No speech interruption detection on ESP32
 
+## 📋 Port ESP32-S3 Zero (Waveshare) — Documentación
+
+Port completo del firmware a la placa **Waveshare ESP32-S3 Zero** con integración opcional del agente de IA local **Hermes** (sin nube, sin coste). Ver rama `feature/esp32-s3-zero-port`.
+
+| Documento | Contenido |
+|---|---|
+| [README\_ELATO.md](docs/README_ELATO.md) | Índice configuración nube Elato |
+| [README\_HERMES.md](docs/README_HERMES.md) | Índice configuración Hermes local (con tabla de diferencias) |
+| [port-esp32-s3-zero](docs/port-esp32-s3-zero.md) | Adaptación del hardware al Zero |
+| [conexionado-por-componente](docs/conexionado-por-componente.md) | Cableado de cada componente + imagen PNG |
+| [etapa-1-elato-cloud](docs/etapa-1-elato-cloud.md) | Cómo probar con la nube de Elato |
+| [registro-dispositivo-backend](docs/registro-dispositivo-backend.md) | Modos DEV/PROD/ELATO y flujo del token |
+| [firmware-binarios-y-flasheo](docs/firmware-binarios-y-flasheo.md) | Cómo compilar, flashear y hacer respaldos |
+| [propuesta-hermes-bridge](docs/propuesta-hermes-bridge.md) | Diseño técnico del puente (para LLMs) |
+| [runbook-hermes-bridge](docs/runbook-hermes-bridge.md) | Instalación paso a paso del puente |
+
 ## 🙌 Contributing
 
 We value your contributions! Here are some ideas to get you started:
