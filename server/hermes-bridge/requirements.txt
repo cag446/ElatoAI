@@ -6,3 +6,5 @@ opuslib>=3.0.1
 webrtcvad-wheels>=2.0.14
 faster-whisper>=1.0
 piper-tts>=1.2
+# voice_history: modulo local (ver voice_history.py — stub incluido en el repo;
+# la implementacion completa con persistencia y contexto Telegram corre en la Mac mini)
