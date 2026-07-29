@@ -29,12 +29,17 @@ local (Mac mini) que transcribe con faster-whisper, consulta al agente
         │    (PCM 16 kHz crudo ──────────►) │
         │                                   ├─ VAD (webrtcvad)
         │                                   ├─ STT (faster-whisper)
-        │                                   ├─ LLM (Hermes :8642)
-        │                                   ├─ TTS (Piper)
+        │                                   ├─ LLM streaming (Hermes :8642)
+        │                                   ├─ TTS por frases (Piper)
         │ (◄────────── Opus 24 kHz + JSON)  ├─ Opus + pacing 110 ms
         ▼                                   ▼
    altavoz MAX98357A                   log en /tmp/hermes-bridge.log
 ```
+
+El pipeline usa **LLM en modo streaming**: el puente empieza a sintetizar voz
+al recibir la primera frase completa del modelo (boundary en `.!?\n`), sin
+esperar la respuesta entera. La latencia percibida es mucho menor que en la
+version inicial.
 
 ---
 
@@ -102,6 +107,10 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+El directorio incluye `voice_history.py` (stub funcional). El puente arranca
+con el, aunque sin persistencia ni contexto Telegram. Ver seccion
+"VoiceHistory y contexto Telegram" mas abajo si se quiere la version completa.
+
 ---
 
 ## Paso 4 — Descargar la voz de Piper (español)
@@ -127,20 +136,34 @@ PIPER_VOICE=~/piper-voices/es_ES-davefx-medium.onnx \
 .venv/bin/python3 bridge.py
 ```
 
-Salida esperada (la primera vez tarda: descarga el modelo Whisper):
+Salida esperada (la primera vez tarda ~2 s: carga el modelo Whisper):
 
 ```
-... Loading faster-whisper model 'small'...
-... Whisper model loaded.
+... Loading faster-whisper model 'base'...
+... Whisper model loaded in 1.8s
 ... Bridge ready: ws://0.0.0.0:8000/  token http://0.0.0.0:3000/api/generate_auth_token
 ... Hermes endpoint: http://127.0.0.1:8642/v1/chat/completions (model hermes-agent)
+... Whisper model: base | Piper voice: /Users/.../es_ES-davefx-medium.onnx
 ```
 
-Verificar el endpoint del token desde otra maquina de la LAN:
+Verificar los endpoints desde otra maquina de la LAN:
 
 ```bash
+# Token
 curl "http://192.168.100.23:3000/api/generate_auth_token?macAddress=TEST"
 # esperado: {"token": "elato-local-token"}
+
+# Health (nuevo en version de produccion)
+curl http://192.168.100.23:3000/health
+curl http://192.168.100.23:8000/health
+# esperado: {"status": "ok"}
+```
+
+Log por turno de conversacion (nuevo en version de produccion):
+
+```
+User: hola como estas
+Hermes: Bien, gracias. ¿En qué te puedo ayudar? | STT=0.4s first_token=1.2s chunks=2
 ```
 
 ### Variables de configuracion (todas opcionales)
@@ -149,12 +172,16 @@ curl "http://192.168.100.23:3000/api/generate_auth_token?macAddress=TEST"
 |---|---|---|
 | `HERMES_API_KEY` | (vacia) | La `API_SERVER_KEY` de Hermes |
 | `HERMES_URL` | `http://127.0.0.1:8642/v1/chat/completions` | Endpoint LLM |
-| `WHISPER_MODEL` | `small` | Modelo STT (`base` = mas rapido, `medium` = mas preciso) |
+| `HERMES_TIMEOUT_S` | `60` | Timeout maximo entre tokens del stream SSE |
+| `WHISPER_MODEL` | `base` | Modelo STT (`base` = rapido, `small`/`medium` = mas preciso) |
 | `PIPER_VOICE` | `~/piper-voices/es_ES-davefx-medium.onnx` | Voz TTS |
 | `BRIDGE_LANGUAGE` | `es` | Idioma para Whisper |
 | `BRIDGE_SYSTEM_PROMPT` | (prompt en español) | Personalidad del asistente |
 | `VAD_SILENCE_MS` | `800` | Silencio que cierra la frase |
+| `VAD_AGGRESSIVENESS` | `1` | Sensibilidad del VAD (0-3; subir si corta frases a mitad) |
 | `BRIDGE_AUTH_TOKEN` | `elato-local-token` | Token devuelto al ESP32 (no se valida) |
+| `BRIDGE_MAX_HISTORY` | `20` | Mensajes de historial que se mantienen en memoria |
+| `BRIDGE_TELEGRAM_CONTEXT` | `5` | Mensajes de Telegram inyectados como contexto (requiere VoiceHistory completo) |
 
 ---
 
@@ -191,13 +218,14 @@ pio run -t upload --upload-port /dev/ttyACM0
 2. **Log del puente**: debe aparecer `Token request from MAC B8:F8:62:D7:59:C4`
    y luego `Device connected (MAC ...)`.
 3. **LED**: verde/amarillo (escuchando) tras el arranque.
-4. **Hablar** una frase y callar: el log muestra `User: <transcripcion>`,
-   luego `Hermes: <respuesta>`, el LED pasa a rojo (procesa) y azul (habla),
-   y el altavoz reproduce la respuesta.
+4. **Hablar** una frase corta y callar: el puente muestra `User: <texto>` y el
+   altavoz responde antes de que Hermes termine (streaming). El log muestra
+   `STT=Xs first_token=Xs chunks=N` al finalizar el turno.
 5. El **boton KY-004** sigue funcionando igual (dormir/despertar).
 
 Monitor serie del ESP32 (opcional): `[WSc] Connected to url: /`, luego
 `AUDIO.COMMITTED` / `RESPONSE.CREATED` / `RESPONSE.COMPLETE` en cada turno.
+`RESPONSE.CREATED` aparece varias veces por turno (una por frase sintetizada).
 
 ---
 
@@ -216,6 +244,30 @@ tail -f /tmp/hermes-bridge.log
 Con `KeepAlive` el puente se reinicia solo si se cae, y arranca al encender la
 Mac mini. El ESP32 reintenta la conexion WebSocket cada 1 s automaticamente,
 asi que un reinicio del puente se recupera sin tocar la placa.
+
+Para detenerlo limpiamente (el bridge registra la señal en el log):
+
+```bash
+launchctl stop com.elato.hermes-bridge   # lo detiene; KeepAlive lo relanza
+launchctl unload ~/Library/LaunchAgents/com.elato.hermes-bridge.plist  # lo desactiva
+```
+
+---
+
+## VoiceHistory y contexto Telegram
+
+El repo incluye `voice_history.py` como stub funcional: el puente arranca y
+conversa normalmente, pero sin persistencia ni integracion con Telegram.
+
+La implementacion completa (disponible en la Mac mini de DebBot) añade:
+- Persistencia del historial de conversacion por MAC del dispositivo.
+- `get_telegram_context()`: inyecta los ultimos N mensajes del canal de
+  Telegram al historial antes de consultar a Hermes, de modo que el asistente
+  de voz sabe lo que se hablo en ese canal.
+
+Para activarla, sustituir `voice_history.py` por la version completa de DebBot.
+La variable `BRIDGE_TELEGRAM_CONTEXT` controla cuantos mensajes se inyectan
+(default 5; poner 0 para desactivar aunque el modulo completo este instalado).
 
 ---
 
@@ -246,12 +298,15 @@ configuracion Elato con un solo comando.
 | `Hermes HTTP 401` en el log | `HERMES_API_KEY` no coincide | Usar la misma `API_SERVER_KEY` de `~/.hermes/.env` |
 | `Hermes HTTP` con connection refused | Hermes no corre o API no habilitada | Paso 1; `hermes gateway` activo |
 | El ESP32 no pide token | IP mal puesta en `Config.cpp` o firewall | Verificar paso 6 y el firewall de macOS (permitir Python) |
-| Conecta pero nunca transcribe | El VAD no detecta voz (ruido de fondo alto) | Subir `VAD_AGGRESSIVENESS` a 3 o revisar el micro |
-| Transcribe frases vacias/cortadas | Silencio de cierre muy corto | Subir `VAD_SILENCE_MS` (p. ej. 1000) |
-| Audio entrecortado en el altavoz | Se perdio el pacing (CPU saturada) | Cerrar cargas pesadas; whisper `base` en vez de `small` |
-| Respuestas muy lentas | Hermes usa herramientas (agentico) | Configurar `model_routes` en Hermes para respuestas directas |
+| Conecta pero nunca transcribe | VAD no detecta voz o ruido de fondo alto | Bajar `VAD_AGGRESSIVENESS` a 0 o subir a 2; revisar el micro |
+| Transcribe frases vacias | Doble-VAD (no deberia ocurrir con `vad_filter=False`) | Verificar que se usa la version de produccion del bridge |
+| El altavoz corta a mitad de la primera frase | VAD_SILENCE_MS demasiado bajo | Subir `VAD_SILENCE_MS` a 1000 |
+| Audio entrecortado en el altavoz | CPU saturada; pacing roto | Cerrar cargas pesadas; usar `WHISPER_MODEL=base` |
+| `first_token` muy alto (>5 s) en el log | Hermes usa herramientas (agentico) | Configurar `model_routes` en Hermes para respuestas directas |
 | `ImportError: opuslib` | Falta libopus | `brew install opus` |
-| El puente muere al desconectar el ESP32 | — (no debe pasar; reconexion soportada) | Revisar `/tmp/hermes-bridge.err` y reportar |
+| `ModuleNotFoundError: voice_history` | Falta el archivo stub | Verificar que `voice_history.py` esta en el mismo directorio que `bridge.py` |
+| WS se desconecta cada ~60 s | heartbeat no configurado (version antigua) | Usar la version de produccion (`heartbeat=30.0`) |
+| El puente no registra la señal de parada | Version antigua sin signal handlers | Usar la version de produccion |
 
 ---
 
@@ -260,18 +315,28 @@ configuracion Elato con un solo comando.
 ```
 MAC MINI:
   ~/.hermes/.env             -> API_SERVER_ENABLED=true, API_SERVER_KEY=...
-  server/hermes-bridge/      -> bridge.py + requirements.txt + plist
+  server/hermes-bridge/      -> bridge.py + voice_history.py + requirements.txt + plist
   ~/piper-voices/            -> voz TTS (.onnx + .onnx.json)
-  puertos: 3000 (token HTTP), 8000 (WS audio), 8642 (Hermes, solo local)
+  puertos: 3000 (token+health), 8000 (WS+health), 8642 (Hermes, solo local)
+
+HEALTH CHECK:
+  curl http://192.168.100.23:3000/health  ->  {"status": "ok"}
+  curl http://192.168.100.23:8000/health  ->  {"status": "ok"}
 
 FIRMWARE (firmware-arduino/):
   src/Config.h    -> #define DEV_MODE + #define VOICE_SERVER_DENO
-  src/Config.cpp  -> ws_server y backend_server = IP de la Mac mini
+  src/Config.cpp  -> ws_server y backend_server = 192.168.100.23
   flasheo         -> pio run -t upload --upload-port /dev/ttyACM0
 
 SERVICIO:
-  launchctl load ~/Library/LaunchAgents/com.elato.hermes-bridge.plist
+  launchctl load   ~/Library/LaunchAgents/com.elato.hermes-bridge.plist
+  launchctl stop   com.elato.hermes-bridge   # parada temporal (KeepAlive lo relanza)
+  launchctl unload ~/Library/LaunchAgents/com.elato.hermes-bridge.plist  # desactivar
   tail -f /tmp/hermes-bridge.log
+
+LOG POR TURNO:
+  User: <texto>
+  Hermes: <respuesta> | STT=0.4s first_token=1.2s chunks=2
 
 ROLLBACK: Config.h -> ELATO_MODE + VOICE_SERVER_CLOUDFLARE y reflashear.
 ```
