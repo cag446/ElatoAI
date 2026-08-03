@@ -63,15 +63,62 @@ Hay dos formas de guardar/flashear el firmware. Es la duda mas comun:
 
 ---
 
-## Respaldo generado
+## Respaldos generados
 
-En el home del usuario hay dos respaldos del firmware "limpio" (modo boton, sin
-diagnosticos), identico a lo grabado en la placa:
+En el home del usuario hay **dos juegos de respaldos**, uno por cada version del
+firmware. **No son intercambiables: hablan con servidores distintos.**
+
+### Version Hermes bridge (la actual — usar esta)
+
+Firmware que habla con `bridge.py` en la Mac Mini (`192.168.100.23:8000`),
+pipeline local: VAD -> Whisper -> Hermes -> Piper. Sin nube.
+
+| Archivo | Que es | Offset | MD5 |
+|---|---|---|---|
+| `~/ElatoAI_ESP32_S3_Bridge.py.bin` | Solo la app | 0x10000 | `075e982cc43c1a370a35ec61e07ba28c` |
+| `~/ElatoAI_ESP32_S3_Bridge.py_merged.bin` | Todo junto | 0x0 | `f2aede4cb8f14dddeda29cff684134ba` |
+
+- **Origen:** build del 2026-07-18 23:19, rama `feature/esp32-s3-zero-port`,
+  commit `6bb603b`. Es la version de produccion validada (ver `runbook-hermes-bridge.md`).
+- **Exportados:** 2026-08-03.
+
+### Version Elato cloud (anterior — historica)
+
+Firmware original que hablaba con la nube de ElatoAI. Se conserva por si hace
+falta volver atras.
 
 | Archivo | Que es | Offset |
 |---|---|---|
 | `~/Firmware_ELATO_ok_limpio.bin` | Solo la app | 0x10000 |
-| `~/Firmware_ELATO_ok_limpio_merged.bin` | Todo junto (bootloader+parts+boot_app0+app) | 0x0 |
+| `~/Firmware_ELATO_ok_limpio_merged.bin` | Todo junto | 0x0 |
+
+- **Origen:** build del 2026-07-18 18:20 (anterior a los cambios del bridge).
+
+> **COMO DISTINGUIRLOS:** el nombre `Bridge.py` indica el firmware que habla con
+> `bridge.py` (local). El `ELATO` es el de la nube. Ante la duda, usar el
+> **Bridge.py**, que es lo que corre hoy en la placa.
+
+---
+
+## Placa nueva (unidad soldada)
+
+Para una placa **virgen** —el caso de la unidad definitiva con los componentes
+soldados— hay que grabar el **merged a `0x0`**, porque una placa de fabrica no
+trae bootloader ni tabla de particiones:
+
+```bash
+esptool --chip esp32s3 --no-stub --port /dev/ttyACM0 write-flash \
+  0x0 ~/ElatoAI_ESP32_S3_Bridge.py_merged.bin
+```
+
+Despues de flashear, la placa necesita configuracion de red igual que el
+prototipo. El conexionado de los componentes esta en
+`conexionado-por-componente.md` (mic, parlante, boton, LED).
+
+> **ANTES DE SOLDAR:** verificar contra `conexionado-por-componente.md` que los
+> pines coinciden con los que espera este firmware. El binario esta compilado
+> con un pinout fijo — si la placa soldada cablea distinto, hay que recompilar,
+> no basta con reflashear.
 
 ---
 
@@ -88,20 +135,20 @@ pio run -t upload --upload-port /dev/ttyACM0
 
 ### Opcion B — grabar el binario merged (respaldo, de un tiro)
 
-Graba TODO a offset `0x0` con esptool:
+Graba TODO a offset `0x0` con esptool. **Es la opcion para una placa nueva.**
 
 ```bash
-esptool --chip esp32s3 --port /dev/ttyACM0 write-flash \
-  0x0 ~/Firmware_ELATO_ok_limpio_merged.bin
+esptool --chip esp32s3 --no-stub --port /dev/ttyACM0 write-flash \
+  0x0 ~/ElatoAI_ESP32_S3_Bridge.py_merged.bin
 ```
 
-### Opcion C — grabar solo la app (`firmware.bin`)
+### Opcion C — grabar solo la app
 
 Solo si el bootloader y las particiones ya estan en la placa:
 
 ```bash
-esptool --chip esp32s3 --port /dev/ttyACM0 write-flash \
-  0x10000 ~/Firmware_ELATO_ok_limpio.bin
+esptool --chip esp32s3 --no-stub --port /dev/ttyACM0 write-flash \
+  0x10000 ~/ElatoAI_ESP32_S3_Bridge.py.bin
 ```
 
 > **ADVERTENCIA:** Si el Zero no entra en modo descarga, **manten pulsado BOOT
@@ -111,14 +158,24 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash \
 
 ---
 
-## Como regenerar el binario merged
+## Como regenerar los respaldos
 
-Si recompilas y quieres un nuevo merged de respaldo:
+Si recompilas y quieres exportar un juego nuevo. Los dos pasos, tal como se
+generaron los respaldos actuales (verificado 2026-08-03):
+
+**1. Copiar la app sola:**
+
+```bash
+cp firmware-arduino/.pio/build/esp32-s3-zero/firmware.bin \
+   ~/ElatoAI_ESP32_S3_Bridge.py.bin
+```
+
+**2. Generar el merged:**
 
 ```bash
 cd firmware-arduino/.pio/build/esp32-s3-zero
 BOOTAPP0=~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin
-esptool --chip esp32s3 merge-bin -o ~/Firmware_ELATO_ok_limpio_merged.bin \
+esptool --chip esp32s3 merge-bin -o ~/ElatoAI_ESP32_S3_Bridge.py_merged.bin \
   --flash-mode dio --flash-freq 80m --flash-size 4MB \
   0x0 bootloader.bin \
   0x8000 partitions.bin \
@@ -126,7 +183,13 @@ esptool --chip esp32s3 merge-bin -o ~/Firmware_ELATO_ok_limpio_merged.bin \
   0x10000 firmware.bin
 ```
 
-> **TIP:** Verifica que una copia es identica al original con `md5sum`.
+Salida esperada: `Wrote 0x13c6f0 bytes ... ready to flash to offset 0x0`.
+
+> **TIP:** Verifica que la copia es identica al original con `md5sum`, y anota
+> el nuevo MD5 en la tabla de respaldos de este documento.
+
+> **NOTA:** `merge-bin` NO necesita la placa conectada — solo junta archivos.
+> El `--no-stub` hace falta al **grabar**, no al generar el merged.
 
 ---
 
@@ -152,12 +215,16 @@ OFFSETS (ESP32-S3):
   0x10000  firmware.bin        <- la app
 
 RESPALDOS (~/):
-  Firmware_ELATO_ok_limpio.bin         -> app sola, offset 0x10000
-  Firmware_ELATO_ok_limpio_merged.bin  -> todo, offset 0x0
+  [Hermes bridge — LA ACTUAL]
+  ElatoAI_ESP32_S3_Bridge.py.bin         -> app sola, offset 0x10000
+  ElatoAI_ESP32_S3_Bridge.py_merged.bin  -> todo, offset 0x0
+  [Elato cloud — historica]
+  Firmware_ELATO_ok_limpio.bin           -> app sola, offset 0x10000
+  Firmware_ELATO_ok_limpio_merged.bin    -> todo, offset 0x0
 
 FLASHEAR:
   pio run -t upload                                  # normal (proyecto)
-  esptool --chip esp32s3 write-flash 0x0 <merged>    # respaldo completo
+  esptool --chip esp32s3 write-flash 0x0 <merged>    # placa nueva / respaldo
   esptool --chip esp32s3 write-flash 0x10000 <app>   # solo app
 
 SIEMPRE en el Zero: --no-stub (USB nativo). Modo descarga: BOOT + conectar USB-C.
