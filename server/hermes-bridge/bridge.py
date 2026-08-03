@@ -10,6 +10,11 @@ Replaces the Elato cloud server with a local pipeline on the Mac mini.
 
   Pipeline per utterance: VAD -> STT (whisper) -> LLM (Hermes) -> TTS (Piper) -> Opus
 
+  M5Stack Cardputer (half-duplex, push-to-talk)
+    -> POST http://<this-host>:8000/voice                     (WAV in, WAV out)
+
+  Pipeline per request: resample -> STT (whisper) -> LLM (Hermes) -> TTS (Piper)
+
 Improvements over baseline:
   - WHISPER_MODEL default "base" (better perf on Intel dual-core vs "small")
   - Latency logging per stage (VAD/STT/LLM/TTS/TOTAL)
@@ -21,9 +26,11 @@ import json
 import logging
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 import numpy as np
 import opuslib
@@ -80,6 +87,11 @@ OPUS_FRAME_SAMPLES = SPK_RATE * OPUS_FRAME_MS // 1000       # 2880
 OPUS_FRAME_BYTES = OPUS_FRAME_SAMPLES * 2                   # 5760
 PACKET_PACE_S = 0.110     # send one 120 ms packet every 110 ms
 
+# REST /voice endpoint (Cardputer). Its mic is locked to 48 kHz by Bruce's
+# firmware, so the resample to MIC_RATE happens here rather than on-device.
+MAX_UPLOAD_BYTES = int(os.environ.get("BRIDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+REST_SESSION_TTL_S = float(os.environ.get("BRIDGE_REST_SESSION_TTL_S", "1800"))
+
 # ---------------------------------------------------------------------------
 # Lazy-loaded heavy components
 # ---------------------------------------------------------------------------
@@ -133,6 +145,67 @@ def resample_to_24k(pcm: bytes, src_rate: int) -> bytes:
     n_out = int(len(samples) * SPK_RATE / src_rate)
     x_out = np.linspace(0, len(samples) - 1, n_out)
     out = np.interp(x_out, np.arange(len(samples)), samples.astype(np.float64))
+    return out.astype(np.int16).tobytes()
+
+
+def _parse_wav(data: bytes) -> tuple[bytes, int, int]:
+    """Extract (pcm, sample_rate, channels) from a RIFF/WAVE byte string.
+
+    Walks the chunk list instead of assuming a 44-byte header, and tolerates a
+    wrong or zero ``data`` size — Bruce patches that field after recording, so a
+    recording cut short by a reset can arrive with a stale length.
+    """
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("not a RIFF/WAVE file")
+    pos, fmt = 12, None
+    while pos + 8 <= len(data):
+        chunk_id = data[pos:pos + 4]
+        size = struct.unpack_from("<I", data, pos + 4)[0]
+        body = pos + 8
+        if chunk_id == b"fmt ":
+            audio_fmt, channels, rate, _brate, _balign, bits = struct.unpack_from(
+                "<HHIIHH", data, body)
+            if audio_fmt != 1 or bits != 16:
+                raise ValueError("only 16-bit PCM WAV is supported")
+            fmt = (channels, rate)
+        elif chunk_id == b"data":
+            if fmt is None:
+                raise ValueError("data chunk before fmt chunk")
+            channels, rate = fmt
+            end = body + size
+            if size == 0 or end > len(data):
+                end = len(data)  # trust the payload over the declared size
+            return data[body:end], rate, channels
+        pos = body + size + (size & 1)  # chunks are word-aligned
+    raise ValueError("no data chunk found")
+
+
+def _make_wav(pcm: bytes, rate: int) -> bytes:
+    """Wrap raw mono 16-bit PCM in a canonical 44-byte WAV header."""
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def _resample_pcm(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Resample mono 16-bit PCM between arbitrary rates."""
+    if src_rate == dst_rate:
+        return pcm
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    if samples.size == 0:
+        return b""
+    ratio = src_rate / dst_rate
+    if ratio.is_integer():
+        # Exact decimation (48k -> 16k is 3:1). Averaging each group doubles as
+        # a cheap low-pass: plain subsampling would fold everything above 8 kHz
+        # back into the band Whisper reads, hurting transcription accuracy.
+        factor = int(ratio)
+        usable = (samples.size // factor) * factor
+        out = samples[:usable].astype(np.float32).reshape(-1, factor).mean(axis=1)
+    else:
+        n_out = int(samples.size * dst_rate / src_rate)
+        x_out = np.linspace(0, samples.size - 1, n_out)
+        out = np.interp(x_out, np.arange(samples.size), samples.astype(np.float64))
     return out.astype(np.int16).tobytes()
 
 
@@ -399,6 +472,118 @@ async def handle_token(request: web.Request) -> web.Response:
     return web.json_response({"token": AUTH_TOKEN})
 
 
+# --- REST /voice (half-duplex clients: M5Stack Cardputer) ------------------
+# The WS path keeps its state in a Session object that lives as long as the
+# socket. A REST client has no such anchor, so conversation history is kept
+# here, keyed by device, and expired after REST_SESSION_TTL_S of silence.
+_rest_sessions: dict[str, dict] = {}
+
+
+def _rest_session(device: str) -> dict:
+    now = time.monotonic()
+    for key, sess in list(_rest_sessions.items()):
+        if now - sess["last_seen"] > REST_SESSION_TTL_S:
+            try:
+                sess["vh"].close_session()
+            except Exception:
+                log.exception("[voice] closing expired session for %s", key)
+            del _rest_sessions[key]
+            log.info("[voice] session expired: %s", key)
+    sess = _rest_sessions.get(device)
+    if sess is None:
+        vh = VoiceHistory(device)
+        vh.start_session()
+        sess = {"history": [], "vh": vh, "last_seen": now}
+        _rest_sessions[device] = sess
+        log.info("[voice] session started: %s", device)
+    sess["last_seen"] = now
+    return sess
+
+
+async def handle_voice(request: web.Request) -> web.Response:
+    """One conversation turn over plain HTTP.
+
+        POST /voice?device=<id>
+          body:    WAV, mono, 16-bit, any sample rate (Cardputer sends 48 kHz)
+          200:     WAV, mono, 16-bit at Piper's native rate
+          headers: X-Transcript / X-Reply, percent-encoded UTF-8
+
+    No VAD here: the client delimits the utterance with push-to-talk, so the
+    whole body is one phrase. No Opus either — the Cardputer decodes WAV
+    natively but cannot handle the raw Opus packets the WS path streams.
+    """
+    t_start = time.monotonic()
+    device = request.query.get("device", "cardputer")
+
+    raw = await request.read()
+    if not raw:
+        return web.json_response({"error": "empty body"}, status=400)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        return web.json_response({"error": "audio too large"}, status=413)
+    try:
+        pcm, src_rate, channels = _parse_wav(raw)
+    except ValueError as exc:
+        log.warning("[voice] bad upload from %s: %s", device, exc)
+        return web.json_response({"error": str(exc)}, status=400)
+    if channels != 1:
+        return web.json_response({"error": "mono audio required"}, status=400)
+
+    audio_s = len(pcm) / (src_rate * 2)
+    loop = asyncio.get_running_loop()
+
+    try:
+        # Every heavy stage goes to the executor: blocking this loop would
+        # also stall the WebSocket session the ESP32-S3 holds open.
+        pcm16k = await loop.run_in_executor(
+            None, _resample_pcm, pcm, src_rate, MIC_RATE)
+        text, stt_s = await loop.run_in_executor(None, transcribe, pcm16k)
+    except Exception:
+        log.exception("[voice] STT failed")
+        return web.json_response({"error": "stt failed"}, status=500)
+
+    if not text:
+        log.info("[voice] no speech in %.1fs of audio from %s", audio_s, device)
+        return web.json_response({"error": "no speech detected"}, status=422)
+    log.info("[voice] User (%s): %s", device, text)
+
+    sess = _rest_session(device)
+    history = sess["history"] + [{"role": "user", "content": text}]
+    history = history[-MAX_HISTORY:]
+
+    telegram_msgs = sess["vh"].get_telegram_context(TELEGRAM_CONTEXT)
+    try:
+        reply, llm_s = await ask_hermes(request.app["http"], telegram_msgs + history)
+    except Exception:
+        log.exception("[voice] Hermes failed")
+        return web.json_response({"error": "llm failed"}, status=502)
+
+    try:
+        pcm_tts, tts_s = await loop.run_in_executor(None, synthesize, reply)
+        tts_rate = piper_sample_rate()
+    except Exception:
+        log.exception("[voice] TTS failed")
+        return web.json_response({"error": "tts failed"}, status=500)
+
+    # Commit only once the turn succeeded end to end, so a failed reply does
+    # not poison the next turn's context.
+    sess["history"] = history + [{"role": "assistant", "content": reply}]
+    sess["vh"].save_message("user", text)
+    sess["vh"].save_message("assistant", reply)
+
+    wav = _make_wav(pcm_tts, tts_rate)
+    log.info(
+        "[voice] Hermes: %s | audio=%.1fs STT=%.1fs LLM=%.1fs TTS=%.1fs "
+        "TOTAL=%.1fs out=%dKB",
+        reply[:120], audio_s, stt_s, llm_s, tts_s,
+        time.monotonic() - t_start, len(wav) // 1024)
+
+    return web.Response(
+        body=wav,
+        content_type="audio/wav",
+        headers={"X-Transcript": quote(text), "X-Reply": quote(reply)},
+    )
+
+
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(request)
@@ -443,6 +628,7 @@ async def main():
     ws_app = web.Application()
     ws_app["http"] = http
     ws_app.router.add_get("/", handle_ws)
+    ws_app.router.add_post("/voice", handle_voice)
     ws_app.router.add_get("/health", lambda r: web.json_response({"status": "ok"}))
 
     token_app = web.Application()
@@ -467,6 +653,7 @@ async def main():
 
     log.info("Bridge ready: ws://0.0.0.0:%d/  token http://0.0.0.0:%d"
              "/api/generate_auth_token", WS_PORT, HTTP_PORT)
+    log.info("REST voice endpoint: POST http://0.0.0.0:%d/voice", WS_PORT)
     log.info("Hermes endpoint: %s (model %s)", HERMES_URL, HERMES_MODEL)
     log.info("Whisper model: %s | Piper voice: %s", WHISPER_MODEL, PIPER_VOICE)
 
