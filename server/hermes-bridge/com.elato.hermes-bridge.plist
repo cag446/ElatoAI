@@ -20,6 +20,9 @@
     <string>change-me-local-dev</string>
     <key>PIPER_VOICE</key>
     <string>/Users/TU_USUARIO/piper-voices/es_ES-davefx-medium.onnx</string>
+    <!-- Regla de voz: sin esto Hermes ejecuta tareas de minutos dentro del turno y el altavoz queda mudo -->
+    <key>BRIDGE_SYSTEM_PROMPT</key>
+    <string>Eres un asistente de voz. Responde siempre en espanol, de forma breve y conversacional (1-3 frases), sin markdown ni listas: tu respuesta sera leida en voz alta por un altavoz. REGLA DE VOZ: por este canal NO ejecutes tareas largas, no uses herramientas que tarden, no modifiques archivos ni despliegues nada. Si te piden algo asi, responde en una frase que lo confirmen por Telegram y no lo hagas. Responde de inmediato: el usuario esta esperando con el altavoz en silencio.</string>
   </dict>
 
   <key>RunAtLoad</key>
