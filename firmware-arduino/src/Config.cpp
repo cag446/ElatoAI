@@ -40,8 +40,19 @@ volatile bool sleepRequested = false;
  */
 
 #ifdef DEV_MODE
-// IP de la Mac mini que corre el puente Hermes (server/hermes-bridge)
-const char *ws_server = "192.168.100.23";
+// IP del equipo que corre el puente Hermes (server/hermes-bridge).
+// Se inyecta en tiempo de compilacion desde la variable de entorno
+// HERMES_SERVER_IP (ver scripts/hermes_server_ip.py):
+//
+//     HERMES_SERVER_IP=192.168.1.100 pio run -t upload
+//
+// El valor de abajo es solo un placeholder para que el build no falle si la
+// variable no esta definida; no apunta a ningun puente real.
+#ifndef HERMES_SERVER_IP
+#define HERMES_SERVER_IP "192.168.1.100"
+#endif
+
+const char *ws_server = HERMES_SERVER_IP;
 const char *ws_path = "/";
 
 #if defined(VOICE_SERVER_DENO)
@@ -51,7 +62,7 @@ const uint16_t ws_port = 8787;
 #endif
 
 // Backend server details (mismo puente: endpoint del token en :3000)
-const char *backend_server = "192.168.100.23";
+const char *backend_server = HERMES_SERVER_IP;
 const uint16_t backend_port = 3000;
 
 #elif defined(PROD_MODE)

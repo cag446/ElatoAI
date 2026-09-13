@@ -175,7 +175,7 @@ A fecha 2026-07-18:
 
 - [ON] `bridge.py` escrito y verificado en sintaxis (`py_compile`).
 - [ON] Firmware cambiado a DEV_MODE y **compilado con exito** (`pio run`).
-- [ON] IP real de la Mac mini (`192.168.100.23`) en `Config.cpp`.
+- [ON] IP de la Mac mini inyectada al compilar via `HERMES_SERVER_IP`.
 - [OFF] Puente instalado en la Mac mini (pendiente: runbook pasos 1-5).
 - [OFF] ESP32 reflasheado (sigue corriendo el firmware ELATO_MODE validado;
   correcto hasta que el puente este desplegado).

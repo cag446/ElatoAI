@@ -70,7 +70,7 @@ firmware. **No son intercambiables: hablan con servidores distintos.**
 
 ### Version Hermes bridge (la actual — usar esta)
 
-Firmware que habla con `bridge.py` en la Mac Mini (`192.168.100.23:8000`),
+Firmware que habla con `bridge.py` en la Mac Mini (`$HERMES_SERVER_IP:8000`, ver [[runbook-hermes-bridge]]),
 pipeline local: VAD -> Whisper -> Hermes -> Piper. Sin nube.
 
 | Archivo | Que es | Offset | MD5 |

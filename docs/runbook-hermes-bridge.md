@@ -87,9 +87,9 @@ curl http://localhost:8642/v1/chat/completions \
 
 ## Paso 2 — Fijar la IP de la Mac mini
 
-El firmware apunta a una IP fija: **192.168.100.23** (ya configurada en
-`Config.cpp`). Reservar esa IP para la Mac mini en el router (reserva DHCP)
-para que nunca cambie.
+El firmware apunta a la IP que le pases al compilar en la variable de entorno
+`HERMES_SERVER_IP` (ver Paso 6). Reservar esa IP para la Mac mini en el router
+(reserva DHCP) para que nunca cambie.
 
 ```bash
 # En la Mac mini, para conocer la IP actual:
@@ -150,12 +150,12 @@ Verificar los endpoints desde otra maquina de la LAN:
 
 ```bash
 # Token
-curl "http://192.168.100.23:3000/api/generate_auth_token?macAddress=TEST"
+curl "http://$HERMES_SERVER_IP:3000/api/generate_auth_token?macAddress=TEST"
 # esperado: {"token": "elato-local-token"}
 
 # Health (nuevo en version de produccion)
-curl http://192.168.100.23:3000/health
-curl http://192.168.100.23:8000/health
+curl http://$HERMES_SERVER_IP:3000/health
+curl http://$HERMES_SERVER_IP:8000/health
 # esperado: {"status": "ok"}
 ```
 
@@ -187,16 +187,23 @@ Hermes: Bien, gracias. ¿En qué te puedo ayudar? | STT=0.4s first_token=1.2s ch
 
 ## Paso 6 — Firmware: IP y flasheo
 
-El firmware ya esta en `DEV_MODE` + `VOICE_SERVER_DENO` con la IP real de la
-Mac mini (`192.168.100.23`) en `firmware-arduino/src/Config.cpp` (bloque
-`#ifdef DEV_MODE`, ~lineas 43 y 54). Si esa IP cambiara algun dia, son estas
-dos lineas:
+El firmware ya esta en `DEV_MODE` + `VOICE_SERVER_DENO`. La IP de la Mac mini
+**no esta escrita en el codigo**: se inyecta al compilar desde la variable de
+entorno `HERMES_SERVER_IP` (lo hace `firmware-arduino/scripts/hermes_server_ip.py`,
+registrado como `extra_scripts` en `platformio.ini`).
 
-```cpp
-const char *ws_server = "192.168.100.23";      // <- IP de la Mac mini
-...
-const char *backend_server = "192.168.100.23"; // <- la misma IP
+```bash
+export HERMES_SERVER_IP=192.168.1.100   # <- la IP reservada de tu Mac mini
 ```
+
+Conviene dejarlo en el `~/.bashrc` (o `~/.zshrc`) del equipo que compila, asi
+no hay que acordarse en cada build. Si la IP cambia, se recompila con el nuevo
+valor: no hay que tocar `Config.cpp`.
+
+> **AVISO:** si `HERMES_SERVER_IP` no esta definida, el build **no falla** pero
+> usa el placeholder `192.168.1.100` de `Config.cpp` y el firmware no va a
+> encontrar el puente. El script lo avisa en la salida de `pio run`:
+> `[hermes] AVISO: HERMES_SERVER_IP no esta definida...`
 
 Compilar y flashear (el Zero necesita `--no-stub`, ya configurado; detalles en
 [[firmware-binarios-y-flasheo]]):
@@ -320,12 +327,12 @@ MAC MINI:
   puertos: 3000 (token+health), 8000 (WS+health), 8642 (Hermes, solo local)
 
 HEALTH CHECK:
-  curl http://192.168.100.23:3000/health  ->  {"status": "ok"}
-  curl http://192.168.100.23:8000/health  ->  {"status": "ok"}
+  curl http://$HERMES_SERVER_IP:3000/health  ->  {"status": "ok"}
+  curl http://$HERMES_SERVER_IP:8000/health  ->  {"status": "ok"}
 
 FIRMWARE (firmware-arduino/):
   src/Config.h    -> #define DEV_MODE + #define VOICE_SERVER_DENO
-  src/Config.cpp  -> ws_server y backend_server = 192.168.100.23
+  IP del puente   -> env HERMES_SERVER_IP (inyectada al compilar)
   flasheo         -> pio run -t upload --upload-port /dev/ttyACM0
 
 SERVICIO:

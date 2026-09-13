@@ -26,7 +26,7 @@ El codigo del puente vive en [`server/hermes-bridge/`](../server/hermes-bridge/)
 
 | Aspecto | Elato (README_ELATO) | Hermes (este README) |
 |---|---|---|
-| Servidor | Nube de Elato (`talkedge.deno.dev`, Cloudflare) | Puente local `bridge.py` en la Mac mini (`192.168.100.23`) |
+| Servidor | Nube de Elato (`talkedge.deno.dev`, Cloudflare) | Puente local `bridge.py` en la Mac mini (`$HERMES_SERVER_IP`) |
 | Modo del firmware (`Config.h`) | `ELATO_MODE` + `VOICE_SERVER_CLOUDFLARE` | `DEV_MODE` + `VOICE_SERVER_DENO` |
 | Transporte | WSS con TLS + certificados CA | WS y HTTP **sin TLS** (LAN domestica) |
 | Token | JWT real de elatoai.com (registro de la MAC en la web) | Fijo (`elato-local-token`), sin registro ni cuenta |
@@ -41,7 +41,7 @@ Cambios concretos en el repo para el modo Hermes (ya aplicados y compilados):
 1. `firmware-arduino/src/Config.h` → `#define DEV_MODE` + `#define VOICE_SERVER_DENO`
    (antes `ELATO_MODE` + `VOICE_SERVER_CLOUDFLARE`).
 2. `firmware-arduino/src/Config.cpp` → `ws_server` y `backend_server` =
-   `192.168.100.23` (IP reservada de la Mac mini); ademas, certificados vacios
+   `$HERMES_SERVER_IP` (IP reservada de la Mac mini); ademas, certificados vacios
    en `DEV_MODE` para satisfacer al linker (`FactoryReset.h`).
 3. Nuevo `server/hermes-bridge/` con el puente completo.
 
@@ -71,7 +71,7 @@ generar su PDF para mantenerlos sincronizados.
 | Aspecto | Valor |
 |---|---|
 | Placa | Waveshare ESP32-S3 Zero (ESP32-S3FH4R2) — montaje sin cambios |
-| Servidor | `bridge.py` (aiohttp) en la Mac mini `192.168.100.23` |
+| Servidor | `bridge.py` (aiohttp) en la Mac mini `$HERMES_SERVER_IP` |
 | Puertos del puente | 3000 (HTTP token), 8000 (WebSocket audio) |
 | Agente | Hermes gateway, API OpenAI-compatible en `127.0.0.1:8642` (solo localhost) |
 | STT | faster-whisper `small` (int8, CPU, idioma `es`) |
