@@ -91,6 +91,19 @@ OPUS_FRAME_SAMPLES = SPK_RATE * OPUS_FRAME_MS // 1000       # 2880
 OPUS_FRAME_BYTES = OPUS_FRAME_SAMPLES * 2                   # 5760
 PACKET_PACE_S = 0.110     # send one 120 ms packet every 110 ms
 
+# Barge-in (Fase A — docs/runbook-bargein-esp32.md §2/§3). Mientras el bridge
+# reproduce (speaking = True) el audio del mic NO se interpreta como frase nueva:
+# se acumula en barge_buf y, si llega un BARGE, se reencola como la frase nueva.
+# Buffer acotado: se conservan solo los últimos N segundos.
+BARGE_BUF_MAX_S = float(os.environ.get("BRIDGE_BARGE_BUF_MAX_S", "10"))
+BARGE_BUF_MAX_BYTES = int(BARGE_BUF_MAX_S * MIC_RATE * 2)
+
+# Gracia de fin de SPEAKING (Fase A, ajuste 2). El device sigue en SPEAKING
+# hasta RESPONSE.COMPLETE + 1 s + su buffer (~200 ms): apagar `speaking` al
+# terminar el stream dejaría el eco de la cola de la propia respuesta entrando
+# al VAD como frase nueva (Fase C, mic abierto en SPEAKING).
+SPEAK_TAIL_GRACE_S = float(os.environ.get("BRIDGE_SPEAK_TAIL_GRACE_S", "1.3"))
+
 # REST /voice endpoint (Cardputer). Its mic is locked to 48 kHz by Bruce's
 # firmware, so the resample to MIC_RATE happens here rather than on-device.
 MAX_UPLOAD_BYTES = int(os.environ.get("BRIDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -312,6 +325,17 @@ class Session:
         self.utter_start = 0.0
         # Voice history persistence
         self.vh = VoiceHistory(device_mac)
+        # --- Barge-in (Fase A) ---
+        self.speaking = False          # True mientras se reproduce una respuesta
+        self.speak_gen = 0             # generación de SPEAKING: la gracia solo apaga la suya
+        self.barge_event = asyncio.Event()
+        self.barge_src = ""            # "device" (lo detectó el ESP32) | "server"
+        self.barge_buf = bytearray()   # audio del mic durante SPEAKING (será la frase nueva)
+        self.pre_buffer = b""          # audio reencolado tras un barge (se antepone al próximo chunk)
+        self.turn_lock = asyncio.Lock()  # A.1: serializa un turno a la vez
+        self.turn_task = None
+        self.turn_tasks: set = set()   # ajuste 1: turnos encolados detrás del lock (no se descartan)
+        self.speak_task = None         # gracia de fin de SPEAKING (ajuste 2)
 
     async def send_json(self, obj: dict):
         await self.ws.send_str(json.dumps(obj))
@@ -331,13 +355,99 @@ class Session:
         await self.send_state("RESPONSE.COMPLETE")
 
     async def feed_audio(self, chunk: bytes):
+        """Consume audio del device. NUNCA bloquea con el pipeline (A.1).
+
+        Corre en el bucle de lectura del WebSocket, así que el turno se lanza
+        como tarea aparte (`_start_turn`) y mientras el bridge habla el audio se
+        acumula para el barge-in en vez de arrancar una frase nueva.
+        """
+        if self.pre_buffer:
+            # Audio reencolado por un barge-in: se antepone para que el VAD lo
+            # siga viendo como continuación de la frase interrumpida.
+            chunk = self.pre_buffer + chunk
+            self.pre_buffer = b""
+
+        if self.speaking:
+            # A.3: este audio todavía NO es una frase nueva — se acumula.
+            # Sin AEC viene "sucio" (voz del usuario + eco de Deb); el AEC es Fase E.
+            self.barge_buf += chunk
+            if len(self.barge_buf) > BARGE_BUF_MAX_BYTES:
+                del self.barge_buf[:len(self.barge_buf) - BARGE_BUF_MAX_BYTES]
+            return
+
         self.pending += chunk
         while len(self.pending) >= VAD_FRAME_BYTES:
             frame = self.pending[:VAD_FRAME_BYTES]
             self.pending = self.pending[VAD_FRAME_BYTES:]
-            await self._feed_frame(frame)
+            self._feed_frame(frame)
 
-    async def _feed_frame(self, frame: bytes):
+    def _start_turn(self, pcm: bytes):
+        """Lanza el pipeline como tarea para que el lector del WS siga leyendo.
+
+        A.1: antes `feed_audio` esperaba `process_utterance` completo (STT + LLM +
+        TTS + envío), así que durante la respuesta no se leía ningún frame nuevo
+        del device y el barge-in era imposible. El lock serializa un turno a la vez.
+
+        Ajuste 1: si ya hay un turno en curso el utterance NO se descarta — se
+        lanza igual y espera el `turn_lock`. Descartarlo perdía audio en una
+        carrera real: tras un barge-in la frase reencolada se cierra por VAD
+        mientras el turno viejo todavía está persistiendo.
+        """
+        if self.turn_task is not None and not self.turn_task.done():
+            log.warning("Turno anterior todavía en curso: el utterance nuevo (%d B) "
+                        "se ENCOLA detrás del turn_lock (no se descarta)", len(pcm))
+        task = asyncio.create_task(self._run_turn(pcm))
+        self.turn_tasks.add(task)
+        task.add_done_callback(self.turn_tasks.discard)
+        self.turn_task = task
+
+    async def _run_turn(self, pcm: bytes):
+        async with self.turn_lock:
+            await self.process_utterance(pcm)
+
+    def request_barge(self, source: str):
+        """Marca la interrupción de la respuesta en curso.
+
+        source="device": lo detectó el ESP32, ya cortó local y mandó
+        `{"type":"server_action","msg":"BARGE"}` (A.4 / camino B).
+        source="server": lo detectó el bridge por su cuenta (detección server-side
+        pendiente, Fase 2 del runbook: necesita AEC, si no el eco de Deb la dispara).
+        """
+        if self.barge_event.is_set():
+            return
+        if not self.speaking:
+            log.info("BARGE (%s) ignorado: el bridge no está reproduciendo", source)
+            return
+        self.barge_src = source
+        self.barge_event.set()
+
+    async def handle_device_text(self, raw: str):
+        """Mensajes de texto device → bridge (A.4). Hoy: server_action/BARGE."""
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if msg.get("type") == "server_action" and msg.get("msg") == "BARGE":
+            log.info("Device BARGE recibido: cortando la respuesta")
+            self.request_barge("device")
+
+    async def shutdown(self):
+        """A.1: el turno corre como tarea aparte → cancelarlo al cerrar la conexión.
+
+        Ajuste 1: puede haber más de un turno vivo (los que esperan el `turn_lock`).
+        """
+        tasks = [t for t in self.turn_tasks if not t.done()]
+        if self.speak_task is not None and not self.speak_task.done():
+            tasks.append(self.speak_task)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def _feed_frame(self, frame: bytes):
         try:
             is_speech = self.vad.is_speech(frame, MIC_RATE)
         except Exception:
@@ -365,7 +475,69 @@ class Session:
             self.in_speech = False
             self.utterance = b""
             if speech_ms >= VAD_MIN_SPEECH_MS:
-                await self.process_utterance(utterance)
+                self._start_turn(utterance)
+
+    async def _send_packets(self, packets) -> bool:
+        """Envía los paquetes Opus dosificados. Devuelve False si un barge-in lo cortó.
+
+        A.2: el chequeo va dentro del bucle de paquetes (granularidad de 110 ms) y
+        no por token — el barge-in puede llegar con la frase ya en el aire.
+        """
+        for pkt in packets:
+            if self.barge_event.is_set():
+                return False
+            await self.ws.send_bytes(pkt)
+            await asyncio.sleep(PACKET_PACE_S)
+        return True
+
+    async def _handle_barge(self):
+        """Corta el turno y devuelve el audio de la interrupción al pipeline.
+
+        - Al device se le manda `BARGE` (vacía su buffer de 10 KB, amp off y
+          LISTENING inmediato, sin el delay de 1 s). **NO** se manda
+          `RESPONSE.COMPLETE`: el device ya volvió a escuchar por su cuenta.
+        - Si el BARGE lo mandó el propio device (ya cortó local), no se repite.
+        - A.3: lo que se dijo encima se reencola (`pre_buffer`) y se procesa como
+          la frase nueva. Ojo: sin AEC este buffer trae también el eco de Deb.
+        """
+        src = self.barge_src
+        self.barge_event.clear()
+        self.barge_src = ""
+        self.speaking = False
+        leftover = bytes(self.barge_buf)
+        self.barge_buf = bytearray()
+        if leftover:
+            self.pre_buffer = leftover + self.pre_buffer
+        if src != "device":
+            await self.send_state("BARGE")
+        log.info("Barge-in (%s): corte — %d B reencolados como frase nueva",
+                 src or "server", len(leftover))
+
+    async def _end_speaking_grace(self, gen: int):
+        """Ajuste 2: mantiene `speaking=True` ~1,3 s después de RESPONSE.COMPLETE.
+
+        El device sigue en SPEAKING hasta RESPONSE.COMPLETE + 1 s + su buffer
+        (~200 ms). Si se apaga `speaking` al terminar el stream, en la Fase C
+        (mic abierto en SPEAKING) el eco de la cola de la propia respuesta
+        entraría al VAD como frase nueva. Lo acumulado en `barge_buf` durante
+        la gracia se descarta: es eco, no hubo BARGE.
+        Interacción con `request_barge`: si en la gracia llega un BARGE del
+        device, se trata como barge normal (el device ya cortó y re-escucha).
+        """
+        try:
+            await asyncio.wait_for(self.barge_event.wait(), timeout=SPEAK_TAIL_GRACE_S)
+            barge = True
+        except asyncio.TimeoutError:
+            barge = False
+        if gen != self.speak_gen:
+            return                     # ya hay otro turno hablando: no tocamos nada
+        if barge:
+            await self._handle_barge()
+            return
+        self.barge_buf = bytearray()   # eco de nuestra cola: se descarta
+        self.speaking = False
+        log.info("SPEAKING: fin de la gracia (%.1fs) — eco de la cola descartado",
+                 SPEAK_TAIL_GRACE_S)
 
     async def process_utterance(self, pcm: bytes):
         loop = asyncio.get_running_loop()
@@ -399,54 +571,99 @@ class Session:
             first_audio_sent = False
             tts_chunks = 0
 
-            async for token in ask_hermes_stream(self.http, self.history):
-                reply_text += token
-                sentence_buf += token
-
-                # Detect boundary: end-of-sentence punctuation or forced flush
-                boundary = False
-                boundary_pos = 0
-                for i, c in enumerate(sentence_buf):
-                    if c in ".!?\n":
-                        boundary = True
-                        boundary_pos = i
+            # A.1: desde acá el audio entrante va a `barge_buf` (no arranca un turno
+            # nuevo) y el corte se evalúa por paquete dentro de `_send_packets` (A.2).
+            # Ajuste 3: `barge_event` se limpia acá — un evento rancio (set entre el
+            # último `_send_packets` y el `finally` del turno anterior) cortaría esta
+            # respuesta con cero audio.
+            self.barge_event.clear()
+            self.barge_src = ""
+            self.speak_gen += 1
+            speak_gen = self.speak_gen
+            self.speaking = True
+            interrupted = False
+            stream = ask_hermes_stream(self.http, self.history)
+            try:
+                async for token in stream:
+                    if self.barge_event.is_set():
+                        interrupted = True
                         break
-                if not boundary and len(sentence_buf) >= 200:
-                    boundary = True
-                    boundary_pos = len(sentence_buf) - 1  # flush all
+                    reply_text += token
+                    sentence_buf += token
 
-                if boundary:
-                    chunk = sentence_buf[:boundary_pos + 1].strip()
-                    sentence_buf = sentence_buf[boundary_pos + 1:]
-                    if chunk:
-                        raw, _ = await loop.run_in_executor(None, synthesize, chunk)
+                    # Detect boundary: end-of-sentence punctuation or forced flush
+                    boundary = False
+                    boundary_pos = 0
+                    for i, c in enumerate(sentence_buf):
+                        if c in ".!?\n":
+                            boundary = True
+                            boundary_pos = i
+                            break
+                    if not boundary and len(sentence_buf) >= 200:
+                        boundary = True
+                        boundary_pos = len(sentence_buf) - 1  # flush all
+
+                    if boundary:
+                        chunk = sentence_buf[:boundary_pos + 1].strip()
+                        sentence_buf = sentence_buf[boundary_pos + 1:]
+                        if chunk:
+                            raw, _ = await loop.run_in_executor(None, synthesize, chunk)
+                            # Ajuste 4: si llegó un BARGE durante la síntesis (Piper
+                            # 0,5–2 s) no mandamos RESPONSE.CREATED: el device
+                            # encendería el amp para nada y lo volvería a apagar.
+                            if self.barge_event.is_set():
+                                interrupted = True
+                                break
+                            pcm24 = resample_to_24k(raw, src_rate)
+                            packets = encode_opus_packets(pcm24)
+                            if not first_audio_sent:
+                                latencies["llm_first_token"] = time.monotonic() - llm_start
+                                first_audio_sent = True
+                            await self.send_state("RESPONSE.CREATED")
+                            if not await self._send_packets(packets):
+                                interrupted = True
+                                break
+                            tts_chunks += 1
+
+                # Flush remaining text after stream ends (cortable también: A.2)
+                remaining = "" if interrupted else sentence_buf.strip()
+                if remaining:
+                    raw, _ = await loop.run_in_executor(None, synthesize, remaining)
+                    # Ajuste 4 (flush final): BARGE durante la síntesis → ni
+                    # RESPONSE.CREATED ni audio.
+                    if self.barge_event.is_set():
+                        interrupted = True
+                    else:
                         pcm24 = resample_to_24k(raw, src_rate)
                         packets = encode_opus_packets(pcm24)
                         if not first_audio_sent:
                             latencies["llm_first_token"] = time.monotonic() - llm_start
                             first_audio_sent = True
                         await self.send_state("RESPONSE.CREATED")
-                        for pkt in packets:
-                            await self.ws.send_bytes(pkt)
-                            await asyncio.sleep(PACKET_PACE_S)
-                        tts_chunks += 1
+                        if await self._send_packets(packets):
+                            tts_chunks += 1
+                        else:
+                            interrupted = True
+            finally:
+                # Cierra el SSE de Hermes (libera la conexión).
+                # Ajuste 2: `speaking` NO se apaga acá — sigue True durante la
+                # gracia de fin de respuesta (ver `_end_speaking_grace`).
+                await stream.aclose()
 
-            # Flush remaining text after stream ends
-            remaining = sentence_buf.strip()
-            if remaining:
-                raw, _ = await loop.run_in_executor(None, synthesize, remaining)
-                pcm24 = resample_to_24k(raw, src_rate)
-                packets = encode_opus_packets(pcm24)
-                if not first_audio_sent:
-                    latencies["llm_first_token"] = time.monotonic() - llm_start
-                    first_audio_sent = True
-                await self.send_state("RESPONSE.CREATED")
-                for pkt in packets:
-                    await self.ws.send_bytes(pkt)
-                    await asyncio.sleep(PACKET_PACE_S)
-                tts_chunks += 1
+            if interrupted:
+                await self._handle_barge()
+                log.info(
+                    "Barge-in: respuesta cortada — %d chars, %d chunks ya enviados",
+                    len(reply_text), tts_chunks)
+                self.history.append({"role": "assistant", "content": reply_text})
+                self.vh.save_message("user", text)
+                self.vh.save_message("assistant", reply_text)
+                return
 
             await self.send_state("RESPONSE.COMPLETE")
+            # Ajuste 2: el device sigue en SPEAKING ~1,3 s más (RESPONSE.COMPLETE
+            # + 1 s + su buffer). La gracia apaga `speaking` y descarta el eco.
+            self.speak_task = asyncio.create_task(self._end_speaking_grace(speak_gen))
 
             # -- Persist --
             self.history.append({"role": "assistant", "content": reply_text})
@@ -464,6 +681,12 @@ class Session:
 
         except Exception:
             log.exception("Pipeline error")
+            # Ajuste 2/3: el turno murió sin pasar por la gracia ni por
+            # `_handle_barge` → dejar SPEAKING y barge_event limpios.
+            self.speaking = False
+            self.barge_event.clear()
+            self.barge_src = ""
+            self.barge_buf = bytearray()
             await self.send_state("RESPONSE.ERROR")
 
 
@@ -603,9 +826,12 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                 await session.feed_audio(msg.data)
             elif msg.type == WSMsgType.TEXT:
                 log.info("Device text: %s", msg.data)
+                await session.handle_device_text(msg.data)
             elif msg.type == WSMsgType.ERROR:
                 log.warning("WS error: %s", ws.exception())
     finally:
+        # A.1: el turno corre como tarea aparte → cancelarlo al cerrar la conexión
+        await session.shutdown()
         session.vh.close_session()
         log.info("Device disconnected (MAC %s)", mac)
     return ws
