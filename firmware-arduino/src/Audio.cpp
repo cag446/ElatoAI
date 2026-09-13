@@ -16,6 +16,9 @@ volatile bool scheduleListeningRestart = false;
 unsigned long scheduledTime = 0;
 unsigned long speakingStartTime = 0;
 
+// BARGE-IN (Fase B): pedido de interrupcion desde el boton fisico.
+volatile bool bargeRequested = false;
+
 // AUDIO SETTINGS
 int currentVolume = 70;
 float currentPitchFactor = 1.0f;
@@ -390,6 +393,20 @@ void websocketSetup(const String& server_domain, int port, const String& path)
 void networkTask(void *parameter) {
     while (1) {
         xSemaphoreTake(wsMutex, portMAX_DELAY);
+
+        // Barge-in (Fase B): el boton se pulso durante la respuesta. Se maneja
+        // aca porque networkTask ya tiene el wsMutex y es dueno del webSocket.
+        // Solo aplica en SPEAKING: cortamos local (transitionToListening) y
+        // avisamos al bridge, que hace request_barge("device") y NO reenvia BARGE.
+        if (bargeRequested) {
+            bargeRequested = false;
+            if (webSocket.isConnected() &&
+                (deviceState == SPEAKING || deviceState == PROCESSING)) {
+                Serial.println("BARGE (button): cutting turn, notifying bridge");
+                webSocket.sendTXT("{\"type\":\"server_action\",\"msg\":\"BARGE\"}");
+                transitionToListening();
+            }
+        }
 
         // Check to see if a transition to listening mode is scheduled.
         if (scheduleListeningRestart && millis() >= scheduledTime) {

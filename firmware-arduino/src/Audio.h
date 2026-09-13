@@ -16,6 +16,10 @@ extern volatile bool scheduleListeningRestart;
 extern unsigned long scheduledTime;
 extern unsigned long speakingStartTime;
 
+// Barge-in (Fase B): lo pone en true el callback del boton (main.cpp) y lo
+// consume networkTask, que es dueno del wsMutex y del webSocket.
+extern volatile bool bargeRequested;
+
 extern int currentVolume;
 extern const int CHANNELS;         // Mono
 extern const int BITS_PER_SAMPLE; // 16-bit audio
