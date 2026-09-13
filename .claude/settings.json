@@ -35,9 +35,7 @@
       "Bash(which heif-convert *)",
       "Bash(python3 -c \"import PIL; from PIL import Image; print\\('PIL', PIL.__version__\\)\")",
       "Bash(python3 -c \"import pillow_heif; print\\('pillow_heif OK'\\)\")",
-      "Bash(pip3 install *)",
       "Bash(python3 -c \"import pillow_heif; print\\('instalado OK'\\)\")",
-      "Bash(python3 -)",
       "Bash(timeout 150 pio run -t upload --upload-port /dev/ttyACM0)",
       "Bash(timeout 200 pio run -t upload --upload-port /dev/ttyACM0)",
       "Bash(timeout 220 pio run -t upload --upload-port /dev/ttyACM0)",
@@ -50,15 +48,12 @@
       "Bash(python3 -c \"from PIL import Image; print\\('pillow ok'\\)\")",
       "Bash(python3 -c \"import PIL; print\\('ok'\\)\")",
       "Bash(python3 -c \"import cairo; print\\('cairo ok'\\)\")",
-      "Bash(python3 *)",
       "Bash(gh api *)",
       "WebFetch(domain:hermes-agent.nousresearch.com)",
       "Bash(pio run *)",
       "Bash(git reset *)",
-      "Bash(gh auth *)",
       "Bash(gh repo *)",
-      "Bash(git remote *)",
-      "Bash(git push *)"
+      "Bash(git remote *)"
     ]
   }
 }
