@@ -19,6 +19,22 @@ sobre la **Waveshare ESP32-S3 Zero**, con tus piezas:
 
 ---
 
+## Diagrama de modulos y cableado
+
+Los cuatro componentes tal como se conectan entre si, con los rieles de
+alimentacion de la protoboard. El color de cada cable indica su funcion
+(5 V, 3.3 V, masa, bus I2S, control) y las flechas, la direccion de la señal.
+
+![Diagrama de modulos y cableado](conexionado-modulos.png)
+
+> **NOTA:** Las posiciones de los pads en el dibujo estan agrupadas por funcion
+> para que se lea; **no** copian el orden fisico del serigrafiado, que varia
+> entre fabricantes. Los nombres y las conexiones si son los de `Config.cpp`.
+> Version vectorial en `conexionado-modulos.svg` y hoja imprimible en
+> `conexionado-modulos.pdf`.
+
+---
+
 ## Tabla visual de conexionado
 
 ![Conexionado ESP32-S3 Zero](conexionado-esp32-s3-zero.png)
