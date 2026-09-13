@@ -51,7 +51,6 @@
       "Bash(gh api *)",
       "WebFetch(domain:hermes-agent.nousresearch.com)",
       "Bash(pio run *)",
-      "Bash(git reset *)",
       "Bash(gh repo *)",
       "Bash(git remote *)"
     ]
