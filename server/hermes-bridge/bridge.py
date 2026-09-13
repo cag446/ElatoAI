@@ -72,9 +72,13 @@ MAX_HISTORY = int(os.environ.get("BRIDGE_MAX_HISTORY", "20"))
 TELEGRAM_CONTEXT = int(os.environ.get("BRIDGE_TELEGRAM_CONTEXT", "5"))
 
 # VAD tuning
-VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "1"))
+# 2026-08-17: bumped default 1 -> 3 so background voices (people walking by)
+# are rejected; ESP32 mic is close so own voice still passes cleanly.
+# 2026-08-17 (2): VAD_MIN_SPEECH_MS 300 -> 500 so short noises / street voices
+# (car doors, passing talk under ~0.5s) never open an utterance.
+VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "3"))
 VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "800"))
-VAD_MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "300"))
+VAD_MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "500"))
 MAX_UTTERANCE_S = float(os.environ.get("MAX_UTTERANCE_S", "30"))
 
 # Audio constants (fixed by firmware — do not change)
