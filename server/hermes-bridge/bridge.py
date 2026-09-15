@@ -104,6 +104,63 @@ BARGE_BUF_MAX_BYTES = int(BARGE_BUF_MAX_S * MIC_RATE * 2)
 # al VAD como frase nueva (Fase C, mic abierto en SPEAKING).
 SPEAK_TAIL_GRACE_S = float(os.environ.get("BRIDGE_SPEAK_TAIL_GRACE_S", "1.3"))
 
+# --- Fase 0: sonda de eco (opt-in) ------------------------------------------
+# Con BRIDGE_ECHO_PROBE=1 el bridge loguea el nivel (dBFS) de lo que entra por
+# el micrófono del device: durante LISTENING (voz del usuario) y durante
+# SPEAKING (eco de Deb + lo que el usuario diga encima). La diferencia entre
+# ambos números es el dato que decide el AEC (runbook §4, Fase 0). Off por
+# defecto: no agrega nada al log de producción.
+ECHO_PROBE = os.environ.get("BRIDGE_ECHO_PROBE", "0").lower() not in (
+    "0", "", "false", "no")
+ECHO_PROBE_DIR = os.environ.get("BRIDGE_ECHO_PROBE_DIR", "/tmp/hermes-eco-probe")
+
+
+def dbfs(pcm: bytes) -> float:
+    """Nivel RMS de un bloque PCM s16le en dBFS (0 dBFS = full scale)."""
+    if len(pcm) < 2:
+        return -120.0
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    if a.size == 0:
+        return -120.0
+    rms = float(np.sqrt(float(np.mean(a * a))))
+    return float(20.0 * np.log10(rms / 32768.0)) if rms > 0 else -120.0
+
+
+def probe_log_levels(tag: str, dbs: list) -> None:
+    """Loguea mediana/p10/p90/max de una lista de niveles por frame (30 ms)."""
+    if not (ECHO_PROBE and dbs):
+        return
+    s = sorted(dbs)
+    n = len(s)
+    log.info("PROBE %s: %d frames (%.2fs) dBFS med=%s p10=%s p90=%s max=%s",
+             tag, n, n * VAD_FRAME_MS / 1000.0,
+             round(s[n // 2], 1), round(s[max(0, int(0.10 * (n - 1)))], 1),
+             round(s[int(0.90 * (n - 1))], 1), round(s[-1], 1))
+
+
+def probe_log(tag: str, pcm: bytes) -> None:
+    """Nivel de un bloque PCM del micrófono, frame por frame (30 ms)."""
+    if not ECHO_PROBE or not pcm:
+        return
+    n = len(pcm) // VAD_FRAME_BYTES
+    probe_log_levels(tag, [dbfs(pcm[i * VAD_FRAME_BYTES:(i + 1) * VAD_FRAME_BYTES])
+                           for i in range(n)])
+
+
+def probe_dump(tag: str, pcm: bytes) -> None:
+    """Guarda el bloque a WAV para analizarlo offline (espectro, AEC, etc.)."""
+    if not (ECHO_PROBE and pcm):
+        return
+    try:
+        os.makedirs(ECHO_PROBE_DIR, exist_ok=True)
+        path = os.path.join(ECHO_PROBE_DIR, "%.2f-%s.wav" % (time.time(), tag))
+        with open(path, "wb") as f:
+            f.write(_make_wav(pcm, MIC_RATE))
+        log.info("PROBE dump: %s (%d B)", path, len(pcm))
+    except OSError as exc:
+        log.warning("PROBE dump falló: %s", exc)
+
+
 # REST /voice endpoint (Cardputer). Its mic is locked to 48 kHz by Bruce's
 # firmware, so the resample to MIC_RATE happens here rather than on-device.
 MAX_UPLOAD_BYTES = int(os.environ.get("BRIDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -336,6 +393,8 @@ class Session:
         self.turn_task = None
         self.turn_tasks: set = set()   # ajuste 1: turnos encolados detrás del lock (no se descartan)
         self.speak_task = None         # gracia de fin de SPEAKING (ajuste 2)
+        # --- Fase 0: sonda de eco ---
+        self.probe_speech: list = []   # dBFS de los frames de voz (LISTENING)
 
     async def send_json(self, obj: dict):
         await self.ws.send_str(json.dumps(obj))
@@ -452,6 +511,8 @@ class Session:
             is_speech = self.vad.is_speech(frame, MIC_RATE)
         except Exception:
             is_speech = False
+        if ECHO_PROBE and is_speech:
+            self.probe_speech.append(dbfs(frame))
 
         if not self.in_speech:
             if is_speech:
@@ -474,6 +535,10 @@ class Session:
             utterance, speech_ms = self.utterance, self.speech_ms
             self.in_speech = False
             self.utterance = b""
+            if ECHO_PROBE:
+                probe_log_levels("voz (LISTENING)", self.probe_speech)
+                self.probe_speech = []
+                probe_dump("voz-usuario", utterance)
             if speech_ms >= VAD_MIN_SPEECH_MS:
                 self._start_turn(utterance)
 
@@ -498,7 +563,10 @@ class Session:
           `RESPONSE.COMPLETE`: el device ya volvió a escuchar por su cuenta.
         - Si el BARGE lo mandó el propio device (ya cortó local), no se repite.
         - A.3: lo que se dijo encima se reencola (`pre_buffer`) y se procesa como
-          la frase nueva. Ojo: sin AEC este buffer trae también el eco de Deb.
+          la frase nueva — SOLO para el barge por voz (src="server", audio ya
+          cancelado por el AEC). Si el barge vino del BOTON (src="device") el
+          buffer es puro eco de Deb (press-then-talk: el usuario aun no hablo)
+          y se descarta.
         """
         src = self.barge_src
         self.barge_event.clear()
@@ -506,6 +574,15 @@ class Session:
         self.speaking = False
         leftover = bytes(self.barge_buf)
         self.barge_buf = bytearray()
+        probe_log("eco (SPEAKING, barge)", leftover)
+        probe_dump("eco-barge", leftover)
+        if leftover and src == "device":
+            # Fase C: con el mic abierto en SPEAKING, el buffer de un barge por
+            # BOTON es solo el eco de Deb. Reencolarlo haria que Whisper
+            # transcriba a Deb como si fuera el usuario. Se descarta.
+            log.info("Barge-in (device): %d B de eco descartados (no es voz del usuario)",
+                     len(leftover))
+            leftover = b""
         if leftover:
             self.pre_buffer = leftover + self.pre_buffer
         if src != "device":
@@ -534,6 +611,8 @@ class Session:
         if barge:
             await self._handle_barge()
             return
+        probe_log("eco (SPEAKING, cola)", bytes(self.barge_buf))
+        probe_dump("eco-cola", bytes(self.barge_buf))
         self.barge_buf = bytearray()   # eco de nuestra cola: se descarta
         self.speaking = False
         log.info("SPEAKING: fin de la gracia (%.1fs) — eco de la cola descartado",
