@@ -487,8 +487,12 @@ class Session:
         except (json.JSONDecodeError, TypeError, ValueError):
             return
         if msg.get("type") == "server_action" and msg.get("msg") == "BARGE":
-            log.info("Device BARGE recibido: cortando la respuesta")
-            self.request_barge("device")
+            # via: "button" (Fase B, press-then-talk: el buffer es eco de Deb)
+            #      "voice"  (Fase C, AEC on-device: el buffer es voz del usuario)
+            # Sin via -> firmware viejo -> se asume boton.
+            via = msg.get("via", "button")
+            log.info("Device BARGE recibido (via=%s): cortando la respuesta", via)
+            self.request_barge("device-voice" if via == "voice" else "device")
 
     async def shutdown(self):
         """A.1: el turno corre como tarea aparte → cancelarlo al cerrar la conexión.
@@ -577,15 +581,16 @@ class Session:
         probe_log("eco (SPEAKING, barge)", leftover)
         probe_dump("eco-barge", leftover)
         if leftover and src == "device":
-            # Fase C: con el mic abierto en SPEAKING, el buffer de un barge por
-            # BOTON es solo el eco de Deb. Reencolarlo haria que Whisper
-            # transcriba a Deb como si fuera el usuario. Se descarta.
-            log.info("Barge-in (device): %d B de eco descartados (no es voz del usuario)",
+            # Barge por BOTON (press-then-talk): el buffer es solo el eco de Deb.
+            # Reencolarlo haria que Whisper transcriba a Deb como si fuera el
+            # usuario. Se descarta. Un barge por VOZ (src="device-voice") lo
+            # CONSERVA: es la voz del usuario ya cancelada por el AEC del device.
+            log.info("Barge-in (device/button): %d B de eco descartados (no es voz del usuario)",
                      len(leftover))
             leftover = b""
         if leftover:
             self.pre_buffer = leftover + self.pre_buffer
-        if src != "device":
+        if not src.startswith("device"):
             await self.send_state("BARGE")
         log.info("Barge-in (%s): corte — %d B reencolados como frase nueva",
                  src or "server", len(leftover))

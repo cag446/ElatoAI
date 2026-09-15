@@ -18,7 +18,8 @@ extern unsigned long speakingStartTime;
 
 // Barge-in (Fase B): lo pone en true el callback del boton (main.cpp) y lo
 // consume networkTask, que es dueno del wsMutex y del webSocket.
-extern volatile bool bargeRequested;
+enum BargeReason : uint8_t { BARGE_NONE = 0, BARGE_BUTTON = 1, BARGE_VOICE = 2 };
+extern volatile BargeReason bargeRequested;   // BARGE_NONE = sin pedido
 
 extern int currentVolume;
 extern const int CHANNELS;         // Mono

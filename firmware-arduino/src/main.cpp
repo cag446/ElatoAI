@@ -103,7 +103,7 @@ static inline bool inActiveTurn() {
 static void onButtonLongPressUpEventCb(void *button_handle, void *usr_data) {
   if (inActiveTurn()) {
     Serial.println("Button (long) -> BARGE");
-    bargeRequested = true;
+    bargeRequested = BARGE_BUTTON;
     return;
   }
   Serial.println("Button long press end -> sleep");
@@ -114,7 +114,7 @@ static void onButtonLongPressUpEventCb(void *button_handle, void *usr_data) {
 static void onButtonDoubleClickCb(void *button_handle, void *usr_data) {
   if (inActiveTurn()) {
     Serial.println("Button (double) -> BARGE");
-    bargeRequested = true;
+    bargeRequested = BARGE_BUTTON;
     return;
   }
   Serial.println("Button double click -> sleep");
@@ -127,7 +127,7 @@ static void onButtonDoubleClickCb(void *button_handle, void *usr_data) {
 static void onButtonSingleClickCb(void *button_handle, void *usr_data) {
   if (inActiveTurn()) {
     Serial.println("Button (single) -> BARGE");
-    bargeRequested = true;
+    bargeRequested = BARGE_BUTTON;
   }
 }
 
