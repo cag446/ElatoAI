@@ -180,7 +180,10 @@ class WebsocketStream : public Print {
 public:
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(uint8_t b) override {
-        if (!webSocket.isConnected() || deviceState != LISTENING) {
+        // Fase C: el mic tambien se envia en SPEAKING (barge por voz / medicion
+        // de eco). Antes solo en LISTENING. El corte por voz lo decide el bridge.
+        if (!webSocket.isConnected() ||
+            (deviceState != LISTENING && deviceState != SPEAKING)) {
             return 1;
         }
         
@@ -192,7 +195,8 @@ public:
     
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(const uint8_t *buffer, size_t size) override {
-        if (size == 0 || !webSocket.isConnected() || deviceState != LISTENING) {
+        if (size == 0 || !webSocket.isConnected() ||
+            (deviceState != LISTENING && deviceState != SPEAKING)) {  // Fase C
             return size;
         }
         
@@ -232,7 +236,8 @@ void micTask(void *parameter) {
             i2sInput.flush();
         }
 
-        if (deviceState == LISTENING && webSocket.isConnected()) {
+        if ((deviceState == LISTENING || deviceState == SPEAKING) &&  // Fase C
+            webSocket.isConnected()) {
             // Use smaller chunk size to avoid blocking too long
             micToWsCopier.copyBytes(MIC_COPY_SIZE);
             
@@ -329,6 +334,13 @@ void webSocketEvent(WStype_t type, const uint8_t *payload, size_t length)
             } else if (strcmp((char*)msg.c_str(), "RESPONSE.CREATED") == 0) {
                 Serial.println("Received RESPONSE.CREATED, transitioning to speaking");
                 transitionToSpeaking();
+            } else if (strcmp((char*)msg.c_str(), "BARGE") == 0) {
+                // Fase C: el bridge detecto voz encima de la respuesta (barge por
+                // voz). Cortar YA, sin el delay de 1 s. Mismo efecto que el boton
+                // (Fase B), pero disparado por el bridge. Hoy inerte hasta que el
+                // AEC/deteccion server-side este activo.
+                Serial.println("BARGE (server): cutting playback, back to listening");
+                transitionToListening();
             } else if (strcmp((char*)msg.c_str(), "SESSION.END") == 0) {
                 Serial.println("Received SESSION.END, going to sleep");
                 sleepRequested = true;
