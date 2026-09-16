@@ -31,7 +31,42 @@
 //
 // Tasas: parlante 24 kHz, mic 16 kHz. La referencia se remuestrea 24k -> 16k.
 
-#define AEC_ENABLED 1
+// ⛔ DESACTIVADO (2026-09-15) — FALSOS POSITIVOS, no por memoria.
+//
+// El AEC arranca bien (48 KB, sin crash) y el barge por voz llego a funcionar
+// end-to-end. Pero en uso real dispara solo: corta a Deb apenas empieza a
+// hablar, sin que el usuario diga nada. Medido en hardware:
+//
+//   [AEC] voz sobre la respuesta: -27.1 dB (piso -58.9) -> BARGE
+//
+// Ese -27.1 dB es el nivel de los PICOS del eco de Deb (medidos: max -24.4,
+// p90 -30.6), no la voz del usuario. Lo que pasa:
+//   - El AEC cancela bien el eco MEDIO: piso de residuo -58.9 dB contra un eco
+//     crudo de -41.7 dB de mediana => ~16 dB de cancelacion.
+//   - Pero NO cancela los PICOS: -24 crudo -> -27 residual, apenas 3 dB. Eso es
+//     eco NO LINEAL (distorsion del amplificador clase D + vibracion de la
+//     protoboard), que un AEC lineal como speex no puede cancelar.
+//   - El detector compara contra un piso lento, y un pico 31 dB sobre el piso
+//     lo dispara. La voz del usuario esta ~27 dB sobre el piso: NO hay
+//     separacion entre "pico de eco" y "voz del usuario" por energia sola.
+//
+// Sintoma secundario que lo confirma: el retardo refinado por correlacion sale
+// distinto en cada arranque (90 -> 130 -> 146 ms) con ratios de pico flojos
+// (~1.5), que es lo que pasa cuando buena parte del eco no es copia lineal de
+// la referencia.
+//
+// COMO SEGUIR (en orden de costo):
+//  1. Supresor de eco RESIDUAL: enlazar un SpeexPreprocessState al echo state
+//     con SPEEX_PREPROCESS_SET_ECHO_STATE (preprocess.c:1162 lo soporta y la
+//     lib expone getEchoState()). Es la pieza estandar que falta: speex separa
+//     el AEC lineal de la supresion del residuo no lineal.
+//  2. Detector de doble-habla comparando residuo vs nivel de referencia, en vez
+//     de un piso absoluto.
+//  3. LAYOUT: separar mic y parlante 10+ cm en la unidad soldada. El eco no
+//     lineal se arregla con fisica, no con software.
+//
+// Mientras tanto el barge por BOTON (Fase B) funciona y no depende de esto.
+#define AEC_ENABLED 0
 
 #include <stdint.h>
 #include <stddef.h>
