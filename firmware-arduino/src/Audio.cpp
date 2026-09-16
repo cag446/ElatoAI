@@ -211,6 +211,14 @@ void audioStreamTask(void *parameter) {
 }
 
 
+// Backoff del uplink de mic. `WebSockets::write()` reintenta hasta 5 s
+// (WEBSOCKETS_TCP_TIMEOUT) cuando el socket no acepta datos, y lo hace con el
+// wsMutex TOMADO: durante ese rato networkTask no puede correr webSocket.loop(),
+// que es quien responde los PING del bridge -> "No PONG received after 15.0s"
+// y desconexion. Un frame de mic perdido no se nota; perder la sesion si.
+static unsigned long micUplinkBackoffUntil = 0;
+constexpr unsigned long MIC_UPLINK_BACKOFF_MS = 250;
+
 class WebsocketStream : public Print {
 public:
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
@@ -222,10 +230,14 @@ public:
         if (!webSocket.isConnected() || deviceState != LISTENING) {
             return 1;
         }
-        
-        xSemaphoreTake(wsMutex, portMAX_DELAY);
-        webSocket.sendBIN(&b, 1);
+        if (millis() < micUplinkBackoffUntil) return 1;
+
+        // Espera acotada: si networkTask (u otro envio) tiene el mutex, se
+        // descarta este frame en vez de encolarse detras de un envio trabado.
+        if (xSemaphoreTake(wsMutex, pdMS_TO_TICKS(10)) != pdTRUE) return 1;
+        bool ok = webSocket.sendBIN(&b, 1);
         xSemaphoreGive(wsMutex);
+        if (!ok) micUplinkBackoffUntil = millis() + MIC_UPLINK_BACKOFF_MS;
         return 1;
     }
     
@@ -234,10 +246,17 @@ public:
         if (size == 0 || !webSocket.isConnected() || deviceState != LISTENING) {
             return size;
         }
-        
-        xSemaphoreTake(wsMutex, portMAX_DELAY);
-        webSocket.sendBIN(buffer, size);
+        if (millis() < micUplinkBackoffUntil) return size;
+
+        if (xSemaphoreTake(wsMutex, pdMS_TO_TICKS(10)) != pdTRUE) return size;
+        bool ok = webSocket.sendBIN(buffer, size);
         xSemaphoreGive(wsMutex);
+        if (!ok) {
+            // Envio trabado (buffer WiFi lleno): parar el uplink un rato para
+            // que networkTask pueda tomar el mutex y responder los PING.
+            micUplinkBackoffUntil = millis() + MIC_UPLINK_BACKOFF_MS;
+            Serial.println("[WS] uplink de mic trabado: backoff 250 ms");
+        }
         return size;
     }
 };
