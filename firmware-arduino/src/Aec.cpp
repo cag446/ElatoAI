@@ -1,11 +1,13 @@
 #include "Aec.h"
 #include <Arduino.h>
 #include <ESP32-SpeexDSP.h>
+#include "speex/speex_preprocess.h"
 #include <math.h>
 #include <string.h>
 
 // --- Estado ---------------------------------------------------------------
 static ESP32SpeexDSP dsp;
+static SpeexPreprocessState *prep = nullptr;  // supresor de eco residual
 static bool ready = false;        // AEC + resampler inicializados
 static bool refReady = false;     // resampler listo (el ring se puede llenar)
 
@@ -54,11 +56,19 @@ static bool  refineDone = false;
 static int   lockedDelay = AEC_DEFAULT_DELAY;   // se cancela desde el arranque
 
 // --- Detector de voz sostenida sobre el residuo ---------------------------
-constexpr float DETECT_MARGIN_DB = 12.0f;
+// Umbral ABSOLUTO: por debajo de esto no se considera voz del usuario, sin
+// importar cuan bajo este el piso. Calibrado con la medicion del 2026-09-16:
+//   picos de residuo (falsos positivos) : -35.7 y -41.6 dB  -> deben quedar afuera
+//   voz del usuario                     : -34.8 med, -29.4 p90 -> debe pasar
+constexpr float DETECT_ABS_DB    = -32.0f;
+constexpr float DETECT_MARGIN_DB = 10.0f;
 constexpr int   DETECT_FRAMES    = 40;   // 40 x 8 ms = 320 ms de voz sostenida
 constexpr int   SETTLE_FRAMES    = 60;   // ~0.5 s para que el filtro converja
 static float floorDb = -60.0f;
 static int   voiceRun = 0;
+static float residualPeakDb = -120.0f;   // medicion del criterio de exito
+static float residualSum = 0;
+static int   residualFrames = 0;
 static int   settle = 0;
 
 static float rmsDb(const int16_t *x, int n) {
@@ -81,12 +91,6 @@ bool aecBegin() {
     return false;
 #else
     uint32_t h0 = ESP.getFreeHeap();
-    if (h0 < AEC_MIN_FREE_HEAP) {
-        Serial.printf("[AEC] heap insuficiente (%u < %u): NO se inicializa, "
-                      "se sigue sin cancelar\n",
-                      (unsigned)h0, (unsigned)AEC_MIN_FREE_HEAP);
-        return false;
-    }
 
     if (!dsp.beginAEC(AEC_FRAME, AEC_FILTER, 16000)) {
         Serial.println("[AEC] beginAEC FAILED");
@@ -100,11 +104,53 @@ bool aecBegin() {
     }
     uint32_t h2 = ESP.getFreeHeap();
 
+    // 2da etapa: supresor de eco RESIDUAL. Es la mitad del diseno de speex que
+    // faltaba: el cancelador lineal deja pasar el eco no lineal (distorsion del
+    // clase D, vibracion), y esto lo suprime espectralmente usando el estado
+    // del propio AEC como referencia de cuanto residuo esperar.
+    prep = speex_preprocess_state_init(AEC_FRAME, 16000);
+    if (prep) {
+        speex_preprocess_ctl(prep, SPEEX_PREPROCESS_SET_ECHO_STATE, dsp.getEchoState());
+        int on = 1;
+        speex_preprocess_ctl(prep, SPEEX_PREPROCESS_SET_DENOISE, &on);
+        // supp: cuanto suprimir cuando SOLO hay eco (agresivo, funciona bien).
+        // suppActive: cuanto suprimir cuando detecta DOBLE-HABLA. Aca iba -30 y
+        // era el error: borraba la voz del usuario junto con el eco, por eso el
+        // barge no disparaba nunca. -15 es el default de speex, pensado
+        // justamente para preservar la voz cercana durante el doble-habla.
+        int supp = -50, suppActive = -15;
+        speex_preprocess_ctl(prep, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS, &supp);
+        speex_preprocess_ctl(prep, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, &suppActive);
+    } else {
+        Serial.println("[AEC] preprocess_state_init FALLO: sin supresor de residuo");
+    }
+    uint32_t h3 = ESP.getFreeHeap();
+
     Serial.printf("[AEC] frame=%d filter=%d | aec=%u B resampler=%u B "
-                  "total=%u B | heap libre %u -> %u\n",
+                  "supresor=%u B total=%u B | heap libre %u -> %u\n",
                   AEC_FRAME, AEC_FILTER,
-                  (unsigned)(h0 - h1), (unsigned)(h1 - h2),
-                  (unsigned)(h0 - h2), (unsigned)h0, (unsigned)h2);
+                  (unsigned)(h0 - h1), (unsigned)(h1 - h2), (unsigned)(h2 - h3),
+                  (unsigned)(h0 - h3), (unsigned)h0, (unsigned)h3);
+
+    // Guardarrail: si lo que queda no alcanza para el scratch de 60 KB que
+    // Opus va a pedir en el primer decode, se libera el supresor (lo mas caro
+    // y lo menos esencial) y se reevalua. Preferimos un asistente sano sin
+    // barge por voz antes que un crash-loop.
+    if (h3 < AEC_MIN_FREE_AFTER && prep) {
+        speex_preprocess_state_destroy(prep);
+        prep = nullptr;
+        uint32_t h4 = ESP.getFreeHeap();
+        Serial.printf("[AEC] heap tras init (%u) < %u: supresor LIBERADO, "
+                      "quedan %u B (solo cancelador lineal)\n",
+                      (unsigned)h3, (unsigned)AEC_MIN_FREE_AFTER, (unsigned)h4);
+        h3 = h4;
+    }
+    if (h3 < AEC_MIN_FREE_AFTER) {
+        Serial.printf("[AEC] heap insuficiente tras init (%u < %u): el AEC queda "
+                      "inactivo para no dejar sin memoria a Opus\n",
+                      (unsigned)h3, (unsigned)AEC_MIN_FREE_AFTER);
+        return false;   // ready=false -> aecProcessMicFrame hace memcpy
+    }
 
     refReady = true;
     ready = true;
@@ -135,6 +181,9 @@ void aecResetReference() {
 }
 
 void aecResetDetector() {
+    residualPeakDb = -120.0f;
+    residualSum = 0;
+    residualFrames = 0;
     memset(lagScore, 0, sizeof(lagScore));
     measureFrames = 0;
     refineTick = 0;
@@ -204,22 +253,40 @@ bool aecProcessMicFrame(const int16_t *mic, int16_t *out) {
     int16_t ref[AEC_FRAME];
     readRefEndingAt(w - (uint32_t)lockedDelay, ref, AEC_FRAME);
     dsp.processAEC((int16_t *)mic, ref, out);
+    if (prep) speex_preprocess_run(prep, out);   // 2da etapa: suprime el residuo
 
     float db = rmsDb(out, AEC_FRAME);
+
+    // --- Medicion del criterio de exito ---------------------------------
+    // Pico del residuo mientras Deb habla. Con solo el cancelador lineal daba
+    // -27 dB (nivel de los picos del eco) y disparaba falsos positivos. El
+    // objetivo del supresor es llevarlo a <= -45 dB, bien por debajo de la voz
+    // del usuario (-31 a -35 dB), para que haya separacion real.
+    if (db > residualPeakDb) residualPeakDb = db;
+    residualSum += db;
+    if (++residualFrames >= 125) {              // ~0.5 s
+        Serial.printf("[AEC] residuo: pico=%.1f dB medio=%.1f dB (objetivo pico <= -45)\n",
+                      residualPeakDb, residualSum / residualFrames);
+        residualPeakDb = -120.0f;
+        residualSum = 0;
+        residualFrames = 0;
+    }
     if (settle < SETTLE_FRAMES) {             // dejar converger el filtro
         settle++;
         floorDb = 0.9f * floorDb + 0.1f * db;
         return false;
     }
-    if (db > floorDb + DETECT_MARGIN_DB) {
+    // Se exigen LAS DOS cosas: destacar sobre el piso (evita disparar con ruido
+    // estacionario) y superar el umbral absoluto (evita los picos del residuo).
+    if (db > floorDb + DETECT_MARGIN_DB && db > DETECT_ABS_DB) {
         voiceRun++;
     } else {
         voiceRun = 0;
         floorDb = 0.98f * floorDb + 0.02f * db;   // el piso sigue al residuo
     }
     if (voiceRun >= DETECT_FRAMES) {
-        Serial.printf("[AEC] voz sobre la respuesta: %.1f dB (piso %.1f) -> BARGE\n",
-                      db, floorDb);
+        Serial.printf("[AEC] voz sobre la respuesta: %.1f dB (piso %.1f, abs %.1f) -> BARGE\n",
+                      db, floorDb, DETECT_ABS_DB);
         voiceRun = 0;
         return true;
     }

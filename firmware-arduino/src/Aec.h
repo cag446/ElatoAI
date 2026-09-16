@@ -66,22 +66,63 @@
 //     lineal se arregla con fisica, no con software.
 //
 // Mientras tanto el barge por BOTON (Fase B) funciona y no depende de esto.
-#define AEC_ENABLED 0
+// ⛔ DESACTIVADO (2026-09-16) — CONCLUSION MEDIDA, no supuesta.
+//
+// Se implemento el diseno COMPLETO de speex: cancelador lineal
+// (speex_echo_cancellation) + SUPRESOR DE ECO RESIDUAL (speex_preprocess con
+// el echo state enlazado, SPEEX_PREPROCESS_SET_ECHO_STATE). El supresor
+// FUNCIONA y se midio cuanto aporta:
+//
+//   pico del residuo, solo cancelador lineal : -27.1 dB
+//   pico del residuo, + supresor             : -35.7 dB   (mejora de 8.6 dB)
+//   piso del residuo                         : -58.9 -> -66.2 dB (7 dB mejor)
+//   voz del usuario en el mic                : -34.8 dB (mediana)
+//
+// El criterio fijado de antemano era pico <= -45 dB, para que la voz del
+// usuario quedara 10 dB por encima del residuo. Se llego a -35.7 dB: el
+// residuo quedo EMPATADO con la voz. Sin separacion, ningun umbral distingue
+// las dos senales. Subir la agresividad del supresor tampoco sirve: durante
+// el doble-habla no puede distinguir la voz del eco y suprimiria ambas.
+//
+// => El limite es FISICO: eco no lineal (distorsion del amplificador clase D +
+//    vibracion) con mic y parlante a centimetros en la misma protoboard. Se
+//    arregla con LAYOUT en la unidad soldada (separar 10+ cm, parlante
+//    apuntando lejos, mic aislado), no con software.
+//
+// El codigo queda completo y probado: reactivar con AEC_ENABLED=1 cuando el
+// montaje cambie, y volver a medir el pico del residuo con el mismo criterio.
+// El barge por BOTON (Fase B) no depende de esto y funciona.
+// REACTIVADO (2026-09-16) para probar la variante de UMBRAL ABSOLUTO.
+// Los dos falsos positivos medidos dieron picos de residuo en -35.7 y -41.6 dB,
+// y la voz del usuario va de -34.8 (mediana) a -29.4 (p90). Hay ~6 dB de
+// ventana en la parte alta. El detector anterior usaba umbral RELATIVO al piso
+// (piso + 12 dB): con el piso en -66 disparaba con cualquier cosa sobre -54.
+// Ahora exige ADEMAS superar un umbral ABSOLUTO calibrado con esos numeros.
+// Es una ventana estrecha: exige hablar a volumen normal-alto y puede fallar
+// si cambia la distancia o el volumen. La solucion de fondo sigue siendo el
+// LAYOUT (separar mic y parlante).
+#define AEC_ENABLED 1
 
 #include <stdint.h>
 #include <stddef.h>
 
 // Frame del AEC en muestras a 16 kHz. 128 = 8 ms.
-constexpr int AEC_FRAME = 128;
+constexpr int AEC_FRAME = 64;
 // Cola de eco que cubre el filtro, en muestras a 16 kHz. 1024 = 64 ms.
 // Con la referencia ya pre-retardada, solo tiene que cubrir la INCERTIDUMBRE
 // del retardo, no el retardo entero.
-constexpr int AEC_FILTER = 1024;
+constexpr int AEC_FILTER = 512;
 
 // Heap libre minimo (bytes) exigido antes de inicializar el AEC. Si no se
 // llega, el AEC no arranca y el firmware sigue funcionando sin cancelar:
 // preferimos un asistente sano sin barge por voz que un crash-loop.
-constexpr uint32_t AEC_MIN_FREE_HEAP = 110 * 1024;
+// libopus reserva un bloque CONTIGUO de 60 KB (GLOBAL_STACK_SIZE) de forma
+// DIFERIDA, en el primer decode — despues de que el AEC ya tomo lo suyo. Si no
+// entra, global_stack queda invalido y crashea en silk_decode_frame. Por eso el
+// guardarraii no mira el heap ANTES de inicializar sino el que QUEDA DESPUES, y
+// exige margen para ese bloque.
+constexpr uint32_t OPUS_SCRATCH_BYTES = 60000;
+constexpr uint32_t AEC_MIN_FREE_AFTER = OPUS_SCRATCH_BYTES + 20 * 1024;  // 80 KB
 
 bool aecBegin();                 // inicializa; imprime el desglose de heap
 void aecFeedReference(const uint8_t *pcm24k, size_t bytes);  // tee de salida
