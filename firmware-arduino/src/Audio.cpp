@@ -141,10 +141,6 @@ void audioStreamTask(void *parameter) {
 
     pinMode(I2S_SD_OUT, OUTPUT);
 
-    // Fase C: AEC + resampler + ring de referencia. Imprime el heap que usa.
-    // Si falla, aecProcessMicFrame() pasa el mic sin cancelar (degrada, no rompe).
-    aecBegin();
-
     OpusSettings cfg;
     cfg.sample_rate = SAMPLE_RATE;
     cfg.channels = CHANNELS;
@@ -183,6 +179,13 @@ void audioStreamTask(void *parameter) {
     vcfgPitch.allow_boost = true;
     volumePitch.begin(vcfgPitch);
 
+    // Fase C: el AEC se inicializa AL FINAL, cuando el decodificador Opus y
+    // todo el pipeline de audio ya tomaron su memoria. En el 1er intento iba
+    // primero y le dejaba el heap agotado a Opus -> crash en silk_decode_frame.
+    // Ademas aecBegin() se niega a arrancar si no hay heap suficiente: el
+    // firmware sigue funcionando sin cancelar (degrada, no rompe).
+    aecBegin();
+
     while (1) {
         if ( i2sOutputFlushScheduled) {
             i2sOutputFlushScheduled = false;
@@ -212,10 +215,11 @@ class WebsocketStream : public Print {
 public:
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(uint8_t b) override {
-        // Fase C: el mic tambien se envia en SPEAKING (barge por voz / medicion
-        // de eco). Antes solo en LISTENING. El corte por voz lo decide el bridge.
-        if (!webSocket.isConnected() ||
-            (deviceState != LISTENING && deviceState != SPEAKING)) {
+        // El mic SOLO se envia en LISTENING. En SPEAKING la deteccion de voz
+        // corre on-device (AEC), asi que no hace falta subir audio: hacerlo
+        // saturaba el socket (EAGAIN) y, como esta escritura toma el wsMutex,
+        // bloqueaba a networkTask -> dejaba de recibir Opus -> LED azul mudo.
+        if (!webSocket.isConnected() || deviceState != LISTENING) {
             return 1;
         }
         
@@ -227,8 +231,7 @@ public:
     
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(const uint8_t *buffer, size_t size) override {
-        if (size == 0 || !webSocket.isConnected() ||
-            (deviceState != LISTENING && deviceState != SPEAKING)) {  // Fase C
+        if (size == 0 || !webSocket.isConnected() || deviceState != LISTENING) {
             return size;
         }
         
@@ -286,8 +289,9 @@ void micTask(void *parameter) {
         } else if (deviceState == SPEAKING) {
             size_t got = i2sInput.readBytes((uint8_t *)micFrame, sizeof(micFrame));
             if (got == sizeof(micFrame)) {
+                // Se procesa LOCAL y no se sube nada: el AEC + el detector
+                // corren aca, el bridge solo necesita enterarse del corte.
                 bool voice = aecProcessMicFrame(micFrame, cleanFrame);
-                wsStream.write((const uint8_t *)cleanFrame, sizeof(cleanFrame));
                 if (voice) {
                     // Misma bandera que levanta el boton (Fase B): networkTask
                     // manda el server_action/BARGE y corta local. via=voice para

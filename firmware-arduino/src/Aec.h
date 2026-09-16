@@ -1,58 +1,57 @@
 #ifndef AEC_H
 #define AEC_H
 
-// Fase C (paso 2): cancelacion de eco acustico on-device para el barge-in por voz.
+// Fase C (paso 2, 2do intento): cancelacion de eco acustico on-device para el
+// barge-in por voz.
 //
-// Idea: mientras Deb habla (SPEAKING), el mic capta a Deb saliendo por el
-// parlante (eco) ademas de la voz del usuario. El AEC de speexdsp resta el eco
-// usando como REFERENCIA el mismo audio que se manda al parlante. Sobre la
-// senal ya cancelada se decide si el usuario esta hablando encima (barge).
+// QUE CAMBIO RESPECTO DEL 1er INTENTO (que crasheo la placa):
 //
-// Numeros medidos el 2026-09-14 con el mic abierto: voz del usuario med
-// -34.8 dBFS, eco de Deb med -41.7 dBFS (7 dB por debajo). Un AEC lineal de
-// ~20 dB deja el eco muy por debajo del residuo; el problema son los PICOS
-// del eco (p90 -30.6), que se solapan con la voz -> por eso no alcanza con un
-// umbral de energia y hace falta cancelar.
+// 1) MEMORIA. El AEC con frame=256/filter=2048 reservaba 92 KB y dejaba al
+//    decodificador Opus sin heap (StoreProhibited en silk_decode_frame).
+//    El consumo de speex escala asi (medido y verificado contra mdf.c):
+//        ~24 * filter_length  +  ~104 * frame_size  +  ~14 KB fijos
+//    Con frame=128/filter=1024 son ~52 KB en vez de 92 KB.
 //
-// Tasas: el parlante suena a 24 kHz y el mic a 16 kHz. La referencia se
-// remuestrea 24k -> 16k antes de entrar al AEC.
+// 2) PRE-RETARDO DE LA REFERENCIA. El error conceptual del 1er intento fue
+//    poner un filtro larguisimo (128 ms) para "alcanzar" el eco. La referencia
+//    se toma en el tee, ANTES del DMA de salida, asi que llega al AEC
+//    ADELANTADA respecto del eco que oye el mic (DMA de salida + acustica +
+//    DMA de entrada). Lo correcto es RETRASAR la referencia ese tanto y usar
+//    un filtro corto, que es lo que abarata la memoria.
+//
+// 3) EL RETARDO SE MIDE SOLO. En vez de adivinarlo, al empezar cada respuesta
+//    se corre una correlacion cruzada mic-vs-referencia sobre un rango de
+//    lags; el pico da el retardo real. Despues se fija y arranca la
+//    cancelacion. Asi no depende de constantes del DMA que pueden cambiar.
+//
+// Numeros del eco medidos el 2026-09-14 con el mic abierto: voz del usuario
+// med -34.8 dBFS, eco de Deb med -41.7 dBFS (7 dB POR DEBAJO de la voz). El
+// eco es cancelable; el problema son los picos (p90 -30.6), que se solapan con
+// la voz y confunden a un detector por energia pura.
+//
+// Tasas: parlante 24 kHz, mic 16 kHz. La referencia se remuestrea 24k -> 16k.
 
-// ⛔ DESACTIVADO (2026-09-15). Con frame=256/filter=2048 el AEC reserva
-// 92 KB de heap ([AEC] ready: heap used=94692) y deja ~44 KB libres en
-// operacion: el decodificador Opus se queda sin memoria y la placa crashea
-// con StoreProhibited dentro de silk_decode_frame apenas Deb empieza a hablar
-// (bucle de reinicio verificado en hardware). Para reactivarlo hay que bajar
-// el consumo: frame=128 + filtro corto + PRE-RETARDO de la referencia (el
-// ring debe mantener ~64 ms de cola, la latencia del DMA de salida, para que
-// un filtro corto alcance a cubrir el eco). Ver la bitacora del 2026-09-15.
-#define AEC_ENABLED 0
+#define AEC_ENABLED 1
 
 #include <stdint.h>
 #include <stddef.h>
 
-// Frame del AEC en muestras a 16 kHz. 256 = 16 ms.
-constexpr int AEC_FRAME = 256;
-// Largo del filtro (cola de eco que puede cancelar) en muestras a 16 kHz.
-// El DMA de salida (6 x 512 B a 24 kHz) mete ~64 ms entre "referencia" y
-// "eco en el mic"; 2048 = 128 ms deja margen.
-constexpr int AEC_FILTER = 2048;
+// Frame del AEC en muestras a 16 kHz. 128 = 8 ms.
+constexpr int AEC_FRAME = 128;
+// Cola de eco que cubre el filtro, en muestras a 16 kHz. 1024 = 64 ms.
+// Con la referencia ya pre-retardada, solo tiene que cubrir la INCERTIDUMBRE
+// del retardo, no el retardo entero.
+constexpr int AEC_FILTER = 1024;
 
-// Inicializa AEC + resampler + ring de referencia. Imprime el heap usado.
-bool aecBegin();
+// Heap libre minimo (bytes) exigido antes de inicializar el AEC. Si no se
+// llega, el AEC no arranca y el firmware sigue funcionando sin cancelar:
+// preferimos un asistente sano sin barge por voz que un crash-loop.
+constexpr uint32_t AEC_MIN_FREE_HEAP = 110 * 1024;
 
-// Tee de salida: llamar con el PCM 16-bit mono a 24 kHz que va al parlante.
-// Lo remuestrea a 16 kHz y lo guarda como referencia. Barato, no bloquea.
-void aecFeedReference(const uint8_t *pcm24k, size_t bytes);
-
-// Descarta la referencia acumulada (al entrar/salir de SPEAKING).
-void aecResetReference();
-
-// Procesa UN frame de mic (AEC_FRAME muestras, 16 kHz) contra la referencia.
-// Escribe la senal cancelada en `out` (mismo tamano). Devuelve true si, sobre
-// la senal cancelada, hay voz sostenida del usuario -> pedir barge.
-bool aecProcessMicFrame(const int16_t *mic, int16_t *out);
-
-// Reinicia el detector de voz sostenida (al empezar cada respuesta).
-void aecResetDetector();
+bool aecBegin();                 // inicializa; imprime el desglose de heap
+void aecFeedReference(const uint8_t *pcm24k, size_t bytes);  // tee de salida
+void aecResetReference();        // al entrar/salir de SPEAKING
+void aecResetDetector();         // reinicia medicion de retardo + detector
+bool aecProcessMicFrame(const int16_t *mic, int16_t *out);   // true = hay voz
 
 #endif

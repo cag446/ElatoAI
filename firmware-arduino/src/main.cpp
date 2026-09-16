@@ -246,18 +246,23 @@ void setup() {
                           1           // Core 1 (application core)
   );
 
+  // Fase C: el tee del AEC corre en esta tarea y llama al resampler de speex,
+  // que usa el STACK para sus buffers temporales. Con 4096 B desbordaba
+  // (vApplicationStackOverflowHook -> reinicio al hablar Deb).
   xTaskCreatePinnedToCore(audioStreamTask, // Function
                           "Speaker Task",  // Name
-                          4096,            // Stack size
+                          8192,            // Stack size: resampler del AEC en esta tarea
                           NULL,            // Parameters
                           3,               // Priority
                           NULL,            // Handle
                           1                // Core 1 (application core)
   );
 
+  // Fase C: aca corre speex_echo_cancellation, que reserva varios KB en el
+  // stack por llamada (ademas de la correlacion de la medicion de retardo).
   xTaskCreatePinnedToCore(micTask,           // Function
                           "Microphone Task", // Name
-                          4096,              // Stack size
+                          10240,             // Stack size: medido, speex usa ~2.5 KB pico
                           NULL,              // Parameters
                           4,                 // Priority
                           NULL,              // Handle

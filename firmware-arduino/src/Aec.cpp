@@ -6,62 +6,107 @@
 
 // --- Estado ---------------------------------------------------------------
 static ESP32SpeexDSP dsp;
-static bool ready = false;
+static bool ready = false;        // AEC + resampler inicializados
+static bool refReady = false;     // resampler listo (el ring se puede llenar)
 
-// Ring de referencia a 16 kHz. Tiene que cubrir la latencia entre "lo que
-// mandamos al I2S" y "lo que el mic oye": DMA (~64 ms) + acustica (<5 ms a
-// 40 cm) + jitter de scheduling. 4096 muestras = 256 ms de margen holgado.
+// Ring de referencia a 16 kHz. Tiene que cubrir el retardo maximo que
+// buscamos (LAG_MAX) mas un frame. 4096 muestras = 256 ms.
 constexpr int REF_RING = 4096;
 static int16_t refRing[REF_RING];
-static volatile int refHead = 0;   // escribe audioStreamTask
-static volatile int refTail = 0;   // lee micTask
+// Contador monotono de muestras escritas. Con el, "la referencia de hace D
+// muestras" es simplemente la ventana que termina en (refWritten - D): no
+// hacen falta punteros head/tail ni FIFO.
+static volatile uint32_t refWritten = 0;
 static portMUX_TYPE refMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Buffer temporal del resampler: un bloque de salida del copier (1024 B =
-// 512 muestras a 24 kHz) da ~342 muestras a 16 kHz.
-static int16_t refTmp[1024];
+// Salida del resampler: el copier escribe bloques de 1024 B = 512 muestras a
+// 24 kHz -> 342 a 16 kHz. 512 sobra.
+static int16_t refTmp[512];
 
-// --- Detector de voz sostenida sobre la senal cancelada -------------------
-// Mide el RMS del residuo y lo compara con un piso que se adapta despacio
-// (tracking del residuo del AEC). Cuando el RMS supera el piso por un margen
-// durante N frames seguidos, hay voz encima de la respuesta.
+// --- Medicion del retardo mic<->referencia --------------------------------
+// Rango de busqueda: 0 a 200 ms. El DMA de salida (6 x 512 B a 24 kHz) mete
+// hasta ~64 ms y el de entrada otro tanto, asi que el pico deberia caer entre
+// 60 y 140 ms; el rango es holgado a proposito.
+constexpr int LAG_MIN   = 0;
+constexpr int LAG_MAX   = 3200;   // 200 ms a 16 kHz
+constexpr int LAG_STEP  = 16;     // 1 ms de resolucion
+constexpr int LAG_BINS  = (LAG_MAX - LAG_MIN) / LAG_STEP;
+constexpr int MEASURE_FRAMES = 120;  // ~1 s de audio para promediar
+
+// Retardo por defecto: 1440 muestras = 90 ms, MEDIDO en hardware el 2026-09-14
+// ([AEC] retardo medido: 1440 muestras, pico 16.53 vs media 5.15). Es una
+// propiedad del pipeline (DMA de salida + acustica + DMA de entrada), asi que
+// no cambia entre arranques. Se usa de entrada y se cancela desde el primer
+// frame; la correlacion queda solo como REFINAMIENTO en segundo plano.
 //
-// Numeros (medidos 2026-09-14): la voz del usuario esta en ~-35 dBFS med, el
-// eco crudo en ~-42. Tras ~20 dB de AEC el residuo queda en ~-60. Un margen
-// de 12 dB sobre el piso separa voz de residuo con holgura.
+// Por que no se bloquea esperando la medicion (error del intento anterior):
+// la ventana de correlacion es de 1 frame = 8 ms, demasiado corta para
+// discriminar lags en voz (el habla se parece a si misma en lags cortos), asi
+// que el pico nunca destacaba lo suficiente y el AEC no arrancaba nunca.
+constexpr int AEC_DEFAULT_DELAY = 1440;
+constexpr float REFINE_RATIO    = 1.25f;  // umbral para ACEPTAR un refinamiento
+constexpr int   REFINE_EVERY    = 4;      // correlacionar 1 de cada 4 frames
+
+static float lagScore[LAG_BINS];
+static int   measureFrames = 0;
+static int   refineTick = 0;
+static bool  refineDone = false;
+static int   lockedDelay = AEC_DEFAULT_DELAY;   // se cancela desde el arranque
+
+// --- Detector de voz sostenida sobre el residuo ---------------------------
 constexpr float DETECT_MARGIN_DB = 12.0f;
-constexpr int   DETECT_FRAMES    = 20;      // 20 x 16 ms = 320 ms de voz sostenida
-constexpr int   WARMUP_FRAMES    = 30;      // ~0.5 s para que el AEC converja
+constexpr int   DETECT_FRAMES    = 40;   // 40 x 8 ms = 320 ms de voz sostenida
+constexpr int   SETTLE_FRAMES    = 60;   // ~0.5 s para que el filtro converja
 static float floorDb = -60.0f;
 static int   voiceRun = 0;
-static int   warmup = 0;
+static int   settle = 0;
 
 static float rmsDb(const int16_t *x, int n) {
-    double acc = 0;
-    for (int i = 0; i < n; i++) acc += (double)x[i] * x[i];
-    float rms = sqrtf((float)(acc / n)) / 32768.0f;
+    float acc = 0;                      // float: el S3 emula doubles por software
+    for (int i = 0; i < n; i++) acc += (float)x[i] * x[i];
+    float rms = sqrtf(acc / n) / 32768.0f;
     return 20.0f * log10f(rms + 1e-9f);
 }
 
-// --- API --------------------------------------------------------------------
+// Copia las `n` muestras de referencia que terminan en `endPos` (exclusivo).
+static void readRefEndingAt(uint32_t endPos, int16_t *out, int n) {
+    uint32_t start = endPos - (uint32_t)n;
+    for (int i = 0; i < n; i++) out[i] = refRing[(start + i) % REF_RING];
+}
+
+// --- API ------------------------------------------------------------------
 bool aecBegin() {
 #if !AEC_ENABLED
     Serial.println("[AEC] deshabilitado (AEC_ENABLED=0): mic sin cancelar");
     return false;
 #else
-    uint32_t before = ESP.getFreeHeap();
+    uint32_t h0 = ESP.getFreeHeap();
+    if (h0 < AEC_MIN_FREE_HEAP) {
+        Serial.printf("[AEC] heap insuficiente (%u < %u): NO se inicializa, "
+                      "se sigue sin cancelar\n",
+                      (unsigned)h0, (unsigned)AEC_MIN_FREE_HEAP);
+        return false;
+    }
+
     if (!dsp.beginAEC(AEC_FRAME, AEC_FILTER, 16000)) {
         Serial.println("[AEC] beginAEC FAILED");
         return false;
     }
-    dsp.enableAEC(true);
-    if (!dsp.beginResampler(24000, 16000, 3)) {   // calidad 3: barata, basta
+    uint32_t h1 = ESP.getFreeHeap();
+
+    if (!dsp.beginResampler(24000, 16000, 0)) {   // calidad 0: la mas barata
         Serial.println("[AEC] beginResampler FAILED");
         return false;
     }
-    uint32_t after = ESP.getFreeHeap();
-    Serial.printf("[AEC] ready: frame=%d filter=%d heap used=%u free=%u\n",
-                  AEC_FRAME, AEC_FILTER, (unsigned)(before - after), (unsigned)after);
+    uint32_t h2 = ESP.getFreeHeap();
+
+    Serial.printf("[AEC] frame=%d filter=%d | aec=%u B resampler=%u B "
+                  "total=%u B | heap libre %u -> %u\n",
+                  AEC_FRAME, AEC_FILTER,
+                  (unsigned)(h0 - h1), (unsigned)(h1 - h2),
+                  (unsigned)(h0 - h2), (unsigned)h0, (unsigned)h2);
+
+    refReady = true;
     ready = true;
     aecResetReference();
     aecResetDetector();
@@ -70,54 +115,99 @@ bool aecBegin() {
 }
 
 void aecFeedReference(const uint8_t *pcm24k, size_t bytes) {
-    if (!ready || bytes < 2) return;
+    if (!refReady || bytes < 2) return;
     int n24 = bytes / 2;
-    if (n24 > 1024) n24 = 1024;
-    int n16 = dsp.resample((int16_t *)pcm24k, n24, refTmp, 1024);
+    if (n24 > 768) n24 = 768;                 // cabe en refTmp tras 3:2
+    int n16 = dsp.resample((int16_t *)pcm24k, n24, refTmp, 512);
+    if (n16 <= 0) return;
     portENTER_CRITICAL(&refMux);
-    for (int i = 0; i < n16; i++) {
-        refRing[refHead] = refTmp[i];
-        refHead = (refHead + 1) % REF_RING;
-        if (refHead == refTail) refTail = (refTail + 1) % REF_RING;  // overrun: pisar lo viejo
-    }
+    uint32_t w = refWritten;
+    for (int i = 0; i < n16; i++) refRing[(w + i) % REF_RING] = refTmp[i];
+    refWritten = w + n16;
     portEXIT_CRITICAL(&refMux);
 }
 
 void aecResetReference() {
     portENTER_CRITICAL(&refMux);
-    refHead = refTail = 0;
+    refWritten = 0;
     portEXIT_CRITICAL(&refMux);
     memset(refRing, 0, sizeof(refRing));
 }
 
 void aecResetDetector() {
+    memset(lagScore, 0, sizeof(lagScore));
+    measureFrames = 0;
+    refineTick = 0;
+    refineDone = false;
+    lockedDelay = AEC_DEFAULT_DELAY;
     voiceRun = 0;
-    warmup = 0;
+    settle = 0;
     floorDb = -60.0f;
 }
 
 bool aecProcessMicFrame(const int16_t *mic, int16_t *out) {
     if (!ready) { memcpy(out, mic, AEC_FRAME * 2); return false; }
 
-    // Sacar AEC_FRAME muestras de referencia (ceros si no hay: el AEC lo tolera).
-    int16_t ref[AEC_FRAME];
     portENTER_CRITICAL(&refMux);
-    for (int i = 0; i < AEC_FRAME; i++) {
-        if (refTail != refHead) {
-            ref[i] = refRing[refTail];
-            refTail = (refTail + 1) % REF_RING;
-        } else {
-            ref[i] = 0;
-        }
-    }
+    uint32_t w = refWritten;
     portEXIT_CRITICAL(&refMux);
 
+    // --- Refinamiento del retardo (NO bloquea la cancelacion) --------------
+    // Corre en paralelo, 1 de cada REFINE_EVERY frames, con floats (el S3 tiene
+    // FPU de simple precision; los doubles son emulados por software y caros).
+    // Si encuentra un pico claro distinto del valor actual, lo ajusta. Si no,
+    // se sigue con el retardo por defecto, que ya es el medido en hardware.
+    if (!refineDone && w >= (uint32_t)(LAG_MAX + AEC_FRAME) &&
+        (++refineTick % REFINE_EVERY) == 0) {
+        float micEnergy = 0;
+        for (int i = 0; i < AEC_FRAME; i++) micEnergy += (float)mic[i] * mic[i];
+        if (micEnergy > 1e4f) {
+            int16_t r[AEC_FRAME];
+            for (int b = 0; b < LAG_BINS; b++) {
+                readRefEndingAt(w - (uint32_t)(LAG_MIN + b * LAG_STEP), r, AEC_FRAME);
+                float dot = 0, refEnergy = 0;
+                for (int i = 0; i < AEC_FRAME; i++) {
+                    dot += (float)mic[i] * r[i];
+                    refEnergy += (float)r[i] * r[i];
+                }
+                if (refEnergy > 1e3f)
+                    lagScore[b] += fabsf(dot) / sqrtf(refEnergy * micEnergy);
+            }
+            if (++measureFrames >= MEASURE_FRAMES) {
+                int best = 0; float bestVal = 0, sum = 0;
+                for (int b = 0; b < LAG_BINS; b++) {
+                    sum += lagScore[b];
+                    if (lagScore[b] > bestVal) { bestVal = lagScore[b]; best = b; }
+                }
+                float mean = sum / LAG_BINS;
+                int cand = LAG_MIN + best * LAG_STEP;
+                if (bestVal > mean * REFINE_RATIO) {
+                    Serial.printf("[AEC] retardo refinado: %d -> %d muestras (%.0f ms) "
+                                  "pico=%.2f media=%.2f\n",
+                                  lockedDelay, cand, cand * 1000.0f / 16000.0f,
+                                  bestVal, mean);
+                    lockedDelay = cand;
+                } else {
+                    Serial.printf("[AEC] refinamiento sin pico claro (%.2f vs %.2f): "
+                                  "se mantiene el retardo por defecto %d (%.0f ms)\n",
+                                  bestVal, mean, lockedDelay,
+                                  lockedDelay * 1000.0f / 16000.0f);
+                }
+                refineDone = true;
+                Serial.printf("[AEC] stack libre en micTask: %u B\n",
+                              (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+            }
+        }
+    }
+
+    // --- Fase 2: cancelar y detectar --------------------------------------
+    int16_t ref[AEC_FRAME];
+    readRefEndingAt(w - (uint32_t)lockedDelay, ref, AEC_FRAME);
     dsp.processAEC((int16_t *)mic, ref, out);
 
-    // Detector sobre el residuo.
     float db = rmsDb(out, AEC_FRAME);
-    if (warmup < WARMUP_FRAMES) {          // dejar converger el filtro
-        warmup++;
+    if (settle < SETTLE_FRAMES) {             // dejar converger el filtro
+        settle++;
         floorDb = 0.9f * floorDb + 0.1f * db;
         return false;
     }
@@ -125,10 +215,11 @@ bool aecProcessMicFrame(const int16_t *mic, int16_t *out) {
         voiceRun++;
     } else {
         voiceRun = 0;
-        floorDb = 0.98f * floorDb + 0.02f * db;   // el piso sigue al residuo, lento
+        floorDb = 0.98f * floorDb + 0.02f * db;   // el piso sigue al residuo
     }
     if (voiceRun >= DETECT_FRAMES) {
-        Serial.printf("[AEC] voice over playback: %.1f dB (floor %.1f) -> BARGE\n", db, floorDb);
+        Serial.printf("[AEC] voz sobre la respuesta: %.1f dB (piso %.1f) -> BARGE\n",
+                      db, floorDb);
         voiceRun = 0;
         return true;
     }
