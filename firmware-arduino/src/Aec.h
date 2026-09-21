@@ -92,7 +92,25 @@
 // El codigo queda completo y probado: reactivar con AEC_ENABLED=1 cuando el
 // montaje cambie, y volver a medir el pico del residuo con el mismo criterio.
 // El barge por BOTON (Fase B) no depende de esto y funciona.
-// REACTIVADO (2026-09-16) para probar la variante de UMBRAL ABSOLUTO.
+// ✅ FUNCIONA (verificado 2026-09-21) — con el usuario CERCA DEL MIC (20-30 cm).
+//
+//   [AEC] voz sobre la respuesta: -23.3 dB (piso -40.3, abs -32.0) -> BARGE
+//   bridge: Device BARGE recibido (via=voice) / 93184 B reencolados
+//   Carlos: "sí, cortó y siguió con mi otra pregunta"
+//   1 solo barge en 243 mediciones: CERO falsos positivos, cero crashes.
+//
+// Corrige la conclusion del 2026-09-16 ("cerrada por software"): el limite NO
+// era el software sino la RELACION VOZ/ECO EN EL MICROFONO. A distancia normal
+// la voz del usuario llegaba por debajo del eco y era indistinguible; a 20-30 cm
+// llega a -23.3 dB, por ENCIMA de los picos del eco (-26 a -30 dB), y el
+// detector la separa limpio. Acercarse a la mitad de distancia = +6 dB.
+//
+// Queda por probar (ataca la causa de fondo, el eco NO LINEAL): bajar el volumen
+// de Deb. Carlos observo que "el parlante satura" — esa saturacion es justamente
+// lo que genera el eco no lineal que el AEC no puede cancelar. Menos volumen =
+// menos eco Y menos distorsion. Si funciona, el barge andaria a distancia normal.
+//
+// Configuracion actual: UMBRAL ABSOLUTO (-32 dB) + PERSISTENCIA (160 ms).
 // Los dos falsos positivos medidos dieron picos de residuo en -35.7 y -41.6 dB,
 // y la voz del usuario va de -34.8 (mediana) a -29.4 (p90). Hay ~6 dB de
 // ventana en la parte alta. El detector anterior usaba umbral RELATIVO al piso
