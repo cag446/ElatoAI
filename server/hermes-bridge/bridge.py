@@ -71,6 +71,19 @@ SYSTEM_PROMPT = os.environ.get(
 MAX_HISTORY = int(os.environ.get("BRIDGE_MAX_HISTORY", "20"))
 TELEGRAM_CONTEXT = int(os.environ.get("BRIDGE_TELEGRAM_CONTEXT", "5"))
 
+# Volumen del parlante del device (0-100). El firmware lo aplica como ganancia
+# LINEAL en VolumeStream (volumen/100), asi que 70->50 son solo -3 dB y 70->25
+# son -9 dB.
+#
+# Medido el 2026-09-21: el eco que capta el mic es PROPORCIONAL a este volumen
+# (bajar de 50 a 25 tiro el pico del residuo 5.2 dB, contra 6.0 dB teoricos).
+# Eso prueba que el eco viaja por AIRE y no por vibracion estructural -> separar
+# fisicamente el parlante del mic va a funcionar.
+#
+# Con volumen 25 el barge-in POR VOZ funciona a DISTANCIA NORMAL (voz -24.5 dB
+# contra picos de eco -34 dB); con 50 o 70 hay que hablarle pegado al mic.
+DEVICE_VOLUME = int(os.environ.get("BRIDGE_DEVICE_VOLUME", "50"))
+
 # VAD tuning
 # 2026-08-17: bumped default 1 -> 3 so background voices (people walking by)
 # are rejected; ESP32 mic is close so own voice still passes cleanly.
@@ -406,7 +419,7 @@ class Session:
         self.vh.start_session()
         await self.send_json({
             "type": "auth",
-            "volume_control": 70,
+            "volume_control": DEVICE_VOLUME,
             "pitch_factor": 1.0,
             "is_ota": False,
             "is_reset": False,
