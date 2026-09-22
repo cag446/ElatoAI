@@ -129,7 +129,7 @@ De `firmware-arduino/platformio.ini`:
 
 | Componente | Modelo | Alimentación |
 |---|---|---|
-| MCU | Waveshare **ESP32-S3 Zero** (ESP32-S3FH4R2, 4 MB flash, sin PSRAM) | USB |
+| MCU | Waveshare **ESP32-S3 Zero** (ESP32-S3FH4R2, 4 MB flash, **2 MB PSRAM** — ver nota) | USB |
 | Micrófono | **INMP441** (I2S) | **3.3 V — nunca 5 V** |
 | Amplificador | **MAX98357A** (I2S) | 5 V recomendado para 8 Ω |
 | Parlante | 8 Ω | A las salidas del amp |
@@ -148,6 +148,22 @@ De `firmware-arduino/platformio.ini`:
 
 > El SD del micrófono va a **GPIO8, no a GPIO14**: en el ESP32-S3 Zero el GPIO14
 > está en los pads de la cara inferior (paso 2.00 mm) y no llega a la protoboard.
+
+> **La PSRAM existe pero está DESACTIVADA — corregido el 2026-09-22.** Una
+> versión anterior de este documento decía "sin PSRAM" y era un error: el sufijo
+> **R2** del `ESP32-S3FH4R2` significa **2 MB de PSRAM QSPI dentro del
+> encapsulado** (datasheet de Espressif; `platformio.ini:13` ya lo decía). Lo
+> que pasa es que el firmware **no la habilita**: `BOARD_HAS_PSRAM` está
+> deliberadamente sin definir porque activarla routó los buffers DMA del I2S a
+> la PSRAM y produjo un crash en `i2s_write`. La causa está documentada: en el
+> ESP32-S3 los buffers DMA deben vivir en **RAM interna**, no en PSRAM. O sea
+> que el problema no fue "la PSRAM no anda" sino cómo se configuró.
+>
+> **Consecuencia para quien evalúe alternativas:** NO descartes un candidato por
+> suponer que esta placa no tiene PSRAM. Hay ~2 MB disponibles si se la habilita
+> manteniendo los buffers DMA en RAM interna, y eso reabre opciones que de otro
+> modo no entrarían — el AFE de ESP-SR, por ejemplo, pide cientos de KB de PSRAM.
+> Ver `docs/investigacion-integracion-oss.md`.
 
 El diagrama completo está en [`conexionado-por-componente.md`](conexionado-por-componente.md)
 y como imagen en [`conexionado-modulos.svg`](conexionado-modulos.svg).
@@ -284,33 +300,39 @@ proyecto parecido.
 8. **El volumen del firmware es ganancia lineal**, no logarítmica: 70 → 50 son
    solo −3 dB. Para −9 dB hay que bajar a 25.
 
+9. **Los buffers DMA del I2S tienen que estar en RAM interna, no en PSRAM.**
+   Esta placa tiene 2 MB de PSRAM (sufijo `R2`) pero el firmware no la habilita:
+   activar `BOARD_HAS_PSRAM` routó los buffers DMA a la PSRAM y crasheó en
+   `i2s_write`. Se puede usar la PSRAM, pero hay que asegurarse de que el audio
+   siga asignándose en RAM interna.
+
 **Python / asyncio**
 
-9. **Cualquier llamada sincrónica lenta en un handler async congela el bridge
+10. **Cualquier llamada sincrónica lenta en un handler async congela el bridge
    entero**: no lee el WebSocket (ni el BARGE que ya está en el socket) ni envía
    audio. Medido: `voice_history` con sqlite sincrónico congelaba el loop
    **540 ms**; movido a `run_in_executor`, **7 ms**.
-10. **`time.sleep()` dentro de un reintento async** es la peor variante del punto
+11. **`time.sleep()` dentro de un reintento async** es la peor variante del punto
     anterior: hasta 300 ms de bloqueo duro por turno.
-11. **`aiohttp` limita el body a 1 MB por default.** Si hay un `MAX_UPLOAD_BYTES`
+12. **`aiohttp` limita el body a 1 MB por default.** Si hay un `MAX_UPLOAD_BYTES`
     mayor, hay que pasar `client_max_size` explícitamente o el 413 llega antes
     que la validación propia.
-12. **Cuidado al mover código a un executor**: convertir en `async def` una
+13. **Cuidado al mover código a un executor**: convertir en `async def` una
     función que después se pasa a `run_in_executor` hace que el executor reciba
     una **corrutina sin ejecutar**. No falla: **deja de persistir en silencio**.
-13. **Un tramo sincrónico no tiene puntos de suspensión; al partirlo en dos
+14. **Un tramo sincrónico no tiene puntos de suspensión; al partirlo en dos
     `await` aparece una ventana de cancelación** que antes no existía. Al mover
     dos escrituras a un executor hay que hacerlas **en un solo viaje**, o una
     cancelación a mitad deja el estado incompleto.
 
 **Método**
 
-14. **Ante un síntoma nuevo, preguntar PRIMERO desde cuándo pasa.** Esa pregunta
+15. **Ante un síntoma nuevo, preguntar PRIMERO desde cuándo pasa.** Esa pregunta
     resolvió el carraspeo después de tres hipótesis erradas.
-15. **Un contador crudo no es evidencia; importa *cuándo* cae el evento.** Los
+16. **Un contador crudo no es evidencia; importa *cuándo* cae el evento.** Los
     mismos 17 timeouts de PONG dicen "el servidor está roto" si solo se cuentan,
     y "el firmware duerme mal" si se mira que ninguno cae durante un turno activo.
-16. **"Cero errores" sin tráfico real no vale nada.** Un log limpio sobre una
+17. **"Cero errores" sin tráfico real no vale nada.** Un log limpio sobre una
     ventana en la que el dispositivo no se conectó ni una vez es evidencia de
     vacío, no de salud.
 
