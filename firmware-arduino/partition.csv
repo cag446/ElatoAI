@@ -1,6 +1,9 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     36K,     20K,
-otadata,  data, ota,     56K,     8K,
-app0,     app,  ota_0,   64K,     2M,
-app1,     app,  ota_1,   ,        2M,
-spiffs,   data, spiffs,  ,        3M,
+# ESP32-S3-Zero (Waveshare) -> 4MB flash layout with OTA (two app slots).
+# Each app slot is ~1.875MB; SPIFFS holds startup.mp3 (~40KB).
+# Name,     Type, SubType,  Offset,   Size,    Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x1E0000,
+app1,       app,  ota_1,    0x1F0000, 0x1E0000,
+spiffs,     data, spiffs,   0x3D0000, 0x20000,
+coredump,   data, coredump, 0x3F0000, 0x10000,

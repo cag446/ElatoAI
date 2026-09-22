@@ -3,6 +3,7 @@
 #include "OTA.h"
 #include "WifiManager.h"
 #include <driver/touch_sensor.h>
+#include "Button.h" // physical button mode (when TOUCH_MODE is disabled)
 
 #define TOUCH_THRESHOLD 28000
 #define REQUIRED_RELEASE_CHECKS                                                \
@@ -87,16 +88,47 @@ void printOutESP32Error(esp_err_t err) {
   }
 }
 
+// Fase B: el boton hace DOBLE funcion segun el estado, porque el FSM de
+// ESP32_Button clasifica una misma pulsacion de forma impredecible en este
+// hardware (un toque sale como "long press"). En vez de pelear con eso, TODO
+// gesto se enruta al mismo criterio:
+//   - durante un turno activo (SPEAKING/PROCESSING) -> barge-in (cortar a Deb)
+//   - fuera de un turno (IDLE/LISTENING)            -> dormir
+// Asi, decida lo que decida el FSM, durante una respuesta siempre interrumpe y
+// nunca duerme. El corte real y el aviso al bridge los hace networkTask.
+static inline bool inActiveTurn() {
+  return deviceState == SPEAKING || deviceState == PROCESSING;
+}
+
 static void onButtonLongPressUpEventCb(void *button_handle, void *usr_data) {
-  Serial.println("Button long press end");
+  if (inActiveTurn()) {
+    Serial.println("Button (long) -> BARGE");
+    bargeRequested = BARGE_BUTTON;
+    return;
+  }
+  Serial.println("Button long press end -> sleep");
   delay(10);
   sleepRequested = true;
 }
 
 static void onButtonDoubleClickCb(void *button_handle, void *usr_data) {
-  Serial.println("Button double click");
+  if (inActiveTurn()) {
+    Serial.println("Button (double) -> BARGE");
+    bargeRequested = BARGE_BUTTON;
+    return;
+  }
+  Serial.println("Button double click -> sleep");
   delay(10);
   sleepRequested = true;
+}
+
+// Un toque corto solo sirve para interrumpir; fuera de un turno no hace nada
+// (evita dormir la placa por un roce accidental).
+static void onButtonSingleClickCb(void *button_handle, void *usr_data) {
+  if (inActiveTurn()) {
+    Serial.println("Button (single) -> BARGE");
+    bargeRequested = BARGE_BUTTON;
+  }
 }
 
 void getAuthTokenFromNVS() {
@@ -198,9 +230,10 @@ void setup() {
   getErr = esp_sleep_enable_ext0_wakeup(BUTTON_PIN, LOW);
   printOutESP32Error(getErr);
   Button *btn = new Button(BUTTON_PIN, false);
+  // Fase B: todos los gestos enrutados a inActiveTurn() (barge o sleep segun estado)
   btn->attachLongPressUpEventCb(&onButtonLongPressUpEventCb, NULL);
   btn->attachDoubleClickEventCb(&onButtonDoubleClickCb, NULL);
-  btn->detachSingleClickEvent();
+  btn->attachSingleClickEventCb(&onButtonSingleClickCb, NULL);
 #endif
 
   // Pin audio tasks to Core 1 (application core)
@@ -213,20 +246,29 @@ void setup() {
                           1           // Core 1 (application core)
   );
 
+  // Fase C: el tee del AEC corre en esta tarea y llama al resampler de speex,
+  // que usa el STACK para sus buffers temporales. Con 4096 B desbordaba
+  // (vApplicationStackOverflowHook -> reinicio al hablar Deb).
   xTaskCreatePinnedToCore(audioStreamTask, // Function
                           "Speaker Task",  // Name
-                          4096,            // Stack size
+                          8192,            // Stack size: resampler del AEC en esta tarea
                           NULL,            // Parameters
-                          3,               // Priority
+                          6,               // Priority: la MAS ALTA del core 1.
+                                           // Si el mic (AEC) le gana CPU, el buffer
+                                           // del parlante se vacia y se oye como
+                                           // carraspeo. Regresion de la Fase C.
                           NULL,            // Handle
                           1                // Core 1 (application core)
   );
 
+  // Fase C: aca corre speex_echo_cancellation, que reserva varios KB en el
+  // stack por llamada (ademas de la correlacion de la medicion de retardo).
   xTaskCreatePinnedToCore(micTask,           // Function
                           "Microphone Task", // Name
-                          4096,              // Stack size
+                          10240,             // Stack size: medido, speex usa ~2.5 KB pico
                           NULL,              // Parameters
-                          4,                 // Priority
+                          3,                 // Priority: POR DEBAJO del parlante.
+                                             // El AEC puede esperar; el audio no.
                           NULL,              // Handle
                           1                  // Core 1 (application core)
   );

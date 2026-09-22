@@ -12,22 +12,28 @@
 // Pick one of the following (DEV_MODE, PROD_MODE, ELATO_MODE) , comment the rest
 // For ELATO_MODE, you will need to register your DIY Hardware on the Elato website
 
-// #define DEV_MODE
+// DEV_MODE + VOICE_SERVER_DENO = puente Hermes local (ws://IP:8000/, token http://IP:3000)
+// ELATO_MODE + VOICE_SERVER_CLOUDFLARE = nube de Elato (config anterior, ver runbook para volver)
+#define DEV_MODE
 // #define PROD_MODE
-#define ELATO_MODE
+// #define ELATO_MODE
 
 // ---------- CHOOSE YOUR VOICE SERVER ----------
 // Keep this separate from DEV/PROD/ELATO so the deployment mode and the voice backend stay independent.
 // Pick one backend for websocket voice traffic.
 
-// #define VOICE_SERVER_DENO
-#define VOICE_SERVER_CLOUDFLARE
+#define VOICE_SERVER_DENO
+// #define VOICE_SERVER_CLOUDFLARE
 
 
 // ---------- CHOOSE YOUR INPUT MODE ----------
 // If you want to use the touch sensor to wake up the device, uncomment the following line
 // If you want to use the button to wake up the device, comment the following line
-#define TOUCH_MODE
+// NOTE (ESP32-S3 Zero): using a physical BUTTON on GPIO2 (touch disabled).
+// The capacitive touch read on the Zero returned a frozen value on a breadboard
+// (~3.1M, unresponsive), so the touch path is not used. If you re-enable touch,
+// recalibrate TOUCH_THRESHOLD in main.cpp to your build's real idle value.
+// #define TOUCH_MODE
 
 extern Preferences preferences;
 extern bool factory_reset_status;
@@ -80,9 +86,10 @@ extern const uint16_t backend_port;
 extern const uint32_t SAMPLE_RATE;
 extern const uint32_t MIC_SAMPLE_RATE;
 
-extern const int BLUE_LED_PIN;
-extern const int RED_LED_PIN;
-extern const int GREEN_LED_PIN;
+// On-board WS2812 RGB LED of the ESP32-S3-Zero (Waveshare) is wired to GPIO21.
+extern const int RGB_LED_PIN;
+extern const int NUM_LEDS;
+extern const uint8_t LED_BRIGHTNESS; // 0-255 master brightness cap for the WS2812
 
 extern const gpio_num_t BUTTON_PIN;
 

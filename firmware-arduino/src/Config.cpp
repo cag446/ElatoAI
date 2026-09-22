@@ -40,7 +40,19 @@ volatile bool sleepRequested = false;
  */
 
 #ifdef DEV_MODE
-const char *ws_server = "192.168.1.33";
+// IP del equipo que corre el puente Hermes (server/hermes-bridge).
+// Se inyecta en tiempo de compilacion desde la variable de entorno
+// HERMES_SERVER_IP (ver scripts/hermes_server_ip.py):
+//
+//     HERMES_SERVER_IP=192.168.1.100 pio run -t upload
+//
+// El valor de abajo es solo un placeholder para que el build no falle si la
+// variable no esta definida; no apunta a ningun puente real.
+#ifndef HERMES_SERVER_IP
+#define HERMES_SERVER_IP "192.168.1.100"
+#endif
+
+const char *ws_server = HERMES_SERVER_IP;
 const char *ws_path = "/";
 
 #if defined(VOICE_SERVER_DENO)
@@ -49,8 +61,8 @@ const uint16_t ws_port = 8000;
 const uint16_t ws_port = 8787;
 #endif
 
-// Backend server details 
-const char *backend_server = "192.168.1.33";
+// Backend server details (mismo puente: endpoint del token en :3000)
+const char *backend_server = HERMES_SERVER_IP;
 const uint16_t backend_port = 3000;
 
 #elif defined(PROD_MODE)
@@ -95,11 +107,16 @@ const uint32_t MIC_SAMPLE_RATE = 16000;
 const i2s_port_t I2S_PORT_IN = I2S_NUM_1;
 const i2s_port_t I2S_PORT_OUT = I2S_NUM_0;
 
-const int BLUE_LED_PIN = 13;
-const int RED_LED_PIN = 9;
-const int GREEN_LED_PIN = 8;
+// ----------------- On-board RGB LED (WS2812) -----------------
+// The ESP32-S3-Zero (Waveshare) has a single addressable WS2812 LED on GPIO21.
+// We no longer drive 3 separate analog R/G/B pins.
+const int RGB_LED_PIN = 21;
+const int NUM_LEDS = 1;
+const uint8_t LED_BRIGHTNESS = 50; // keep it dim; the WS2812 is very bright at 255
 
-const int I2S_SD = 14;
+const int I2S_SD = 8;  // mic data. Movido de GPIO14: ese pad esta en la cara inferior
+                       // (2.00mm) del ESP32-S3 Zero y no llega a protoboard. GPIO8 esta
+                       // en la fila lateral (2.54mm).
 const int I2S_WS = 4;
 const int I2S_SCK = 1;
 
@@ -239,5 +256,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 #endif
+
+#else
+// DEV_MODE: todo va por HTTP/WS sin TLS; los certificados no se usan pero
+// FactoryReset.h referencia Vercel_CA_cert, asi que deben existir para el linker.
+const char *Vercel_CA_cert = "";
+const char *CA_cert = "";
 
 #endif

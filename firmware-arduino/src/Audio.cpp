@@ -1,6 +1,22 @@
 #include "OTA.h"
 #include "Audio.h"
 #include "PitchShift.h"
+#include "Aec.h"
+
+// Fase C: tee de referencia para el AEC. Se inserta entre `volume` y el I2S
+// de salida: todo lo que va al parlante pasa por aca primero y se copia (a
+// 16 kHz) como referencia del cancelador. Es un Print transparente.
+class AecReferenceTee : public Print {
+public:
+    explicit AecReferenceTee(Print &downstream) : _down(downstream) {}
+    size_t write(uint8_t b) override { return _down.write(b); }
+    size_t write(const uint8_t *data, size_t len) override {
+        aecFeedReference(data, len);
+        return _down.write(data, len);
+    }
+private:
+    Print &_down;
+};
 
 // WEBSOCKET
 SemaphoreHandle_t wsMutex;
@@ -15,6 +31,9 @@ TaskHandle_t networkTaskHandle = NULL;
 volatile bool scheduleListeningRestart = false;
 unsigned long scheduledTime = 0;
 unsigned long speakingStartTime = 0;
+
+// BARGE-IN (Fase B): pedido de interrupcion desde el boton fisico.
+volatile BargeReason bargeRequested = BARGE_NONE;
 
 // AUDIO SETTINGS
 int currentVolume = 70;
@@ -51,9 +70,10 @@ BufferPrint bufferPrint(audioBuffer);
 OpusAudioDecoder opusDecoder;  //access guarded by wsmutex
 BufferRTOS<uint8_t> audioBuffer(AUDIO_BUFFER_SIZE, AUDIO_CHUNK_SIZE);  //producer: networkTask, consumer: audioStreamTask. Thread safe in single producer->single consumer scenario.
 I2SStream i2s; //access from audioStreamTask only
+AecReferenceTee aecTee(i2s);   // Fase C: la referencia del AEC sale de aca
 
 // OLD with no pitch shift
-VolumeStream volume(i2s); //access from audioStreamTask only
+VolumeStream volume(aecTee); //access from audioStreamTask only (via tee -> i2s)
 QueueStream<uint8_t> queue(audioBuffer); //access from audioStreamTask only
 StreamCopy copier(volume, queue);
 
@@ -77,7 +97,16 @@ void transitionToSpeaking() {
     vTaskDelay(50);
 
     i2sInputFlushScheduled = true;
-    
+
+    // Fase C: RESPONSE.CREATED llega una vez POR FRASE, no por turno. El AEC y
+    // el detector solo se reinician al ENTRAR a SPEAKING desde otro estado;
+    // entre frases del mismo turno se conservan (si no, el warm-up de ~0.5 s se
+    // repetiria en cada frase y el barge por voz nunca dispararia).
+    if (deviceState != SPEAKING) {
+        aecResetReference();
+        aecResetDetector();
+    }
+
     deviceState = SPEAKING;
     digitalWrite(I2S_SD_OUT, HIGH);
     speakingStartTime = millis();
@@ -99,6 +128,8 @@ void transitionToListening() {
 
     Serial.println("Transitioned to listening mode");
 
+    aecResetReference();   // Fase C: la referencia vieja no sirve al proximo turno
+
     deviceState = LISTENING;
     digitalWrite(I2S_SD_OUT, LOW);
     // webSocket.disableHeartbeat();
@@ -107,7 +138,7 @@ void transitionToListening() {
 // audioStreamTask -> copier.copy() (conditional on webSocket.isConnected())
 void audioStreamTask(void *parameter) {
     Serial.println("Starting I2S stream pipeline...");
-    
+
     pinMode(I2S_SD_OUT, OUTPUT);
 
     OpusSettings cfg;
@@ -148,6 +179,13 @@ void audioStreamTask(void *parameter) {
     vcfgPitch.allow_boost = true;
     volumePitch.begin(vcfgPitch);
 
+    // Fase C: el AEC se inicializa AL FINAL, cuando el decodificador Opus y
+    // todo el pipeline de audio ya tomaron su memoria. En el 1er intento iba
+    // primero y le dejaba el heap agotado a Opus -> crash en silk_decode_frame.
+    // Ademas aecBegin() se niega a arrancar si no hay heap suficiente: el
+    // firmware sigue funcionando sin cancelar (degrada, no rompe).
+    aecBegin();
+
     while (1) {
         if ( i2sOutputFlushScheduled) {
             i2sOutputFlushScheduled = false;
@@ -173,17 +211,33 @@ void audioStreamTask(void *parameter) {
 }
 
 
+// Backoff del uplink de mic. `WebSockets::write()` reintenta hasta 5 s
+// (WEBSOCKETS_TCP_TIMEOUT) cuando el socket no acepta datos, y lo hace con el
+// wsMutex TOMADO: durante ese rato networkTask no puede correr webSocket.loop(),
+// que es quien responde los PING del bridge -> "No PONG received after 15.0s"
+// y desconexion. Un frame de mic perdido no se nota; perder la sesion si.
+static unsigned long micUplinkBackoffUntil = 0;
+constexpr unsigned long MIC_UPLINK_BACKOFF_MS = 250;
+
 class WebsocketStream : public Print {
 public:
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(uint8_t b) override {
+        // El mic SOLO se envia en LISTENING. En SPEAKING la deteccion de voz
+        // corre on-device (AEC), asi que no hace falta subir audio: hacerlo
+        // saturaba el socket (EAGAIN) y, como esta escritura toma el wsMutex,
+        // bloqueaba a networkTask -> dejaba de recibir Opus -> LED azul mudo.
         if (!webSocket.isConnected() || deviceState != LISTENING) {
             return 1;
         }
-        
-        xSemaphoreTake(wsMutex, portMAX_DELAY);
-        webSocket.sendBIN(&b, 1);
+        if (millis() < micUplinkBackoffUntil) return 1;
+
+        // Espera acotada: si networkTask (u otro envio) tiene el mutex, se
+        // descarta este frame en vez de encolarse detras de un envio trabado.
+        if (xSemaphoreTake(wsMutex, pdMS_TO_TICKS(10)) != pdTRUE) return 1;
+        bool ok = webSocket.sendBIN(&b, 1);
         xSemaphoreGive(wsMutex);
+        if (!ok) micUplinkBackoffUntil = millis() + MIC_UPLINK_BACKOFF_MS;
         return 1;
     }
     
@@ -192,10 +246,17 @@ public:
         if (size == 0 || !webSocket.isConnected() || deviceState != LISTENING) {
             return size;
         }
-        
-        xSemaphoreTake(wsMutex, portMAX_DELAY);
-        webSocket.sendBIN(buffer, size);
+        if (millis() < micUplinkBackoffUntil) return size;
+
+        if (xSemaphoreTake(wsMutex, pdMS_TO_TICKS(10)) != pdTRUE) return size;
+        bool ok = webSocket.sendBIN(buffer, size);
         xSemaphoreGive(wsMutex);
+        if (!ok) {
+            // Envio trabado (buffer WiFi lleno): parar el uplink un rato para
+            // que networkTask pueda tomar el mutex y responder los PING.
+            micUplinkBackoffUntil = millis() + MIC_UPLINK_BACKOFF_MS;
+            Serial.println("[WS] uplink de mic trabado: backoff 250 ms");
+        }
         return size;
     }
 };
@@ -223,17 +284,40 @@ void micTask(void *parameter) {
 
     micToWsCopier.setDelayOnNoData(0);
 
+    // Fase C: en SPEAKING el mic no va directo al WS: se lee por frames fijos,
+    // pasa por el AEC (referencia = lo que suena) y se manda la senal cancelada.
+    // Sobre esa senal se detecta voz sostenida del usuario -> barge por voz.
+    static int16_t micFrame[AEC_FRAME];
+    static int16_t cleanFrame[AEC_FRAME];
+
     while (1) {
         if (i2sInputFlushScheduled) {
             i2sInputFlushScheduled = false;
             i2sInput.flush();
         }
 
-        if (deviceState == LISTENING && webSocket.isConnected()) {
-            // Use smaller chunk size to avoid blocking too long
+        if (!webSocket.isConnected()) {
+            vTaskDelay(10);
+            continue;
+        }
+
+        if (deviceState == LISTENING) {
+            // Camino original: copia directa, chunks chicos para no bloquear.
             micToWsCopier.copyBytes(MIC_COPY_SIZE);
-            
-            // Yield more frequently
+            vTaskDelay(1);
+        } else if (deviceState == SPEAKING) {
+            size_t got = i2sInput.readBytes((uint8_t *)micFrame, sizeof(micFrame));
+            if (got == sizeof(micFrame)) {
+                // Se procesa LOCAL y no se sube nada: el AEC + el detector
+                // corren aca, el bridge solo necesita enterarse del corte.
+                bool voice = aecProcessMicFrame(micFrame, cleanFrame);
+                if (voice) {
+                    // Misma bandera que levanta el boton (Fase B): networkTask
+                    // manda el server_action/BARGE y corta local. via=voice para
+                    // que el bridge CONSERVE el audio (es voz ya cancelada, no eco).
+                    bargeRequested = BARGE_VOICE;
+                }
+            }
             vTaskDelay(1);
         } else {
             vTaskDelay(10);
@@ -326,6 +410,13 @@ void webSocketEvent(WStype_t type, const uint8_t *payload, size_t length)
             } else if (strcmp((char*)msg.c_str(), "RESPONSE.CREATED") == 0) {
                 Serial.println("Received RESPONSE.CREATED, transitioning to speaking");
                 transitionToSpeaking();
+            } else if (strcmp((char*)msg.c_str(), "BARGE") == 0) {
+                // Fase C: el bridge detecto voz encima de la respuesta (barge por
+                // voz). Cortar YA, sin el delay de 1 s. Mismo efecto que el boton
+                // (Fase B), pero disparado por el bridge. Hoy inerte hasta que el
+                // AEC/deteccion server-side este activo.
+                Serial.println("BARGE (server): cutting playback, back to listening");
+                transitionToListening();
             } else if (strcmp((char*)msg.c_str(), "SESSION.END") == 0) {
                 Serial.println("Received SESSION.END, going to sleep");
                 sleepRequested = true;
@@ -390,6 +481,28 @@ void websocketSetup(const String& server_domain, int port, const String& path)
 void networkTask(void *parameter) {
     while (1) {
         xSemaphoreTake(wsMutex, portMAX_DELAY);
+
+        // Barge-in (Fase B): el boton se pulso durante la respuesta. Se maneja
+        // aca porque networkTask ya tiene el wsMutex y es dueno del webSocket.
+        // Solo aplica en SPEAKING: cortamos local (transitionToListening) y
+        // avisamos al bridge, que hace request_barge("device") y NO reenvia BARGE.
+        if (bargeRequested != BARGE_NONE) {
+            BargeReason why = bargeRequested;
+            bargeRequested = BARGE_NONE;
+            if (webSocket.isConnected() &&
+                (deviceState == SPEAKING || deviceState == PROCESSING)) {
+                // via: "button" -> el bridge descarta el buffer (es eco de Deb,
+                // press-then-talk); "voice" -> lo conserva (voz del usuario ya
+                // pasada por el AEC) y lo procesa como la frase nueva.
+                const char *via = (why == BARGE_VOICE) ? "voice" : "button";
+                Serial.printf("BARGE (%s): cutting turn, notifying bridge\n", via);
+                char msg[80];
+                snprintf(msg, sizeof(msg),
+                         "{\"type\":\"server_action\",\"msg\":\"BARGE\",\"via\":\"%s\"}", via);
+                webSocket.sendTXT(msg);
+                transitionToListening();
+            }
+        }
 
         // Check to see if a transition to listening mode is scheduled.
         if (scheduleListeningRestart && millis() >= scheduledTime) {
