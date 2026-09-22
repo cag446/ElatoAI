@@ -19,7 +19,6 @@ static int16_t refRing[REF_RING];
 // muestras" es simplemente la ventana que termina en (refWritten - D): no
 // hacen falta punteros head/tail ni FIFO.
 static volatile uint32_t refWritten = 0;
-static portMUX_TYPE refMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Salida del resampler: el copier escribe bloques de 1024 B = 512 muestras a
 // 24 kHz -> 342 a 16 kHz. 512 sobra.
@@ -166,17 +165,22 @@ void aecFeedReference(const uint8_t *pcm24k, size_t bytes) {
     if (n24 > 768) n24 = 768;                 // cabe en refTmp tras 3:2
     int n16 = dsp.resample((int16_t *)pcm24k, n24, refTmp, 512);
     if (n16 <= 0) return;
-    portENTER_CRITICAL(&refMux);
+    // Un solo productor (audioStreamTask) y un solo consumidor (micTask): se
+    // escriben los datos y DESPUES se publica el indice. No hace falta seccion
+    // critica, y meterla aca era un error: deshabilitar interrupciones en el
+    // camino del parlante cortaba el audio (se oia como carraspeo). Tampoco se
+    // usa modulo por muestra: se envuelve el indice a mano.
     uint32_t w = refWritten;
-    for (int i = 0; i < n16; i++) refRing[(w + i) % REF_RING] = refTmp[i];
-    refWritten = w + n16;
-    portEXIT_CRITICAL(&refMux);
+    int idx = (int)(w % REF_RING);
+    for (int i = 0; i < n16; i++) {
+        refRing[idx] = refTmp[i];
+        if (++idx >= REF_RING) idx = 0;
+    }
+    refWritten = w + n16;       // volatile: publica el avance al consumidor
 }
 
 void aecResetReference() {
-    portENTER_CRITICAL(&refMux);
     refWritten = 0;
-    portEXIT_CRITICAL(&refMux);
     memset(refRing, 0, sizeof(refRing));
 }
 
@@ -197,9 +201,7 @@ void aecResetDetector() {
 bool aecProcessMicFrame(const int16_t *mic, int16_t *out) {
     if (!ready) { memcpy(out, mic, AEC_FRAME * 2); return false; }
 
-    portENTER_CRITICAL(&refMux);
-    uint32_t w = refWritten;
-    portEXIT_CRITICAL(&refMux);
+    uint32_t w = refWritten;    // uint32 volatil: lectura atomica, sin bloquear
 
     // --- Refinamiento del retardo (NO bloquea la cancelacion) --------------
     // Corre en paralelo, 1 de cada REFINE_EVERY frames, con floats (el S3 tiene

@@ -253,7 +253,10 @@ void setup() {
                           "Speaker Task",  // Name
                           8192,            // Stack size: resampler del AEC en esta tarea
                           NULL,            // Parameters
-                          3,               // Priority
+                          6,               // Priority: la MAS ALTA del core 1.
+                                           // Si el mic (AEC) le gana CPU, el buffer
+                                           // del parlante se vacia y se oye como
+                                           // carraspeo. Regresion de la Fase C.
                           NULL,            // Handle
                           1                // Core 1 (application core)
   );
@@ -264,7 +267,8 @@ void setup() {
                           "Microphone Task", // Name
                           10240,             // Stack size: medido, speex usa ~2.5 KB pico
                           NULL,              // Parameters
-                          4,                 // Priority
+                          3,                 // Priority: POR DEBAJO del parlante.
+                                             // El AEC puede esperar; el audio no.
                           NULL,              // Handle
                           1                  // Core 1 (application core)
   );
