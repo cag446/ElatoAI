@@ -405,27 +405,35 @@ async def _vh(fn, *args):
 
 
 # ---------------------------------------------------------------------------
-# PENDIENTE CONOCIDO (hallazgo de Deb, 2026-09-21) — voice_history bloquea el
-# event loop y es, por lejos, el peor offender del bridge:
+# voice_history y el event loop — PARCIALMENTE RESUELTO (2026-09-21).
 #
-#   - get_telegram_context() corre un SELECT SINCRONO en el loop cada turno, y
-#     save_message() dos escrituras mas: 3-4 viajes a sqlite por turno.
-#   - Cada llamada abre conexion nueva y corre PRAGMA journal_mode=WAL.
-#   - Lo grave: voice_history._retry hace time.sleep(0.1*(intento+1)) ante un
-#     SQLITE_BUSY -> hasta 300 ms de bloqueo DURO del event loop, mas el
-#     busy_timeout. Y Hermes escribe ese mismo state.db todo el tiempo.
-#   - Cae con el turn_lock tomado, asi que retrasa el arranque del turno
-#     encolado despues de un barge-in.
+# RESUELTO: ninguna operacion del camino POR-TURNO bloquea ya el loop. Las 10
+# llamadas de contexto/save/close pasan por _vh() (executor). Medido por Deb
+# antes y despues, con un ticker del propio loop:
+#     llamada directa -> loop congelado 540 ms, CERO ticks
+#     via _vh()       -> gap maximo 7 ms, 85 ticks
 #
-# Comparado con esto, mover resample_to_24k/encode_opus_packets a un executor
-# (~30-60 ms por frase, 1-3% del presupuesto de una frase de 2-3 s) rinde poco.
-# Si se toca este archivo por otra razon, empezar por aca: sqlite a executor y
-# sacar el time.sleep del loop.
+# SIGUE PENDIENTE (nada urgente, sin sintoma reportado):
+#   - _rest_session() no es async: start_session/close_session y
+#     VoiceHistory.__init__ (_ensure_db) corren en el loop. Costo normal ~0 ms,
+#     PERO ahi mismo esta el barrido de sesiones expiradas, que corre en CADA
+#     turno REST (no solo cuando expira alguna). Esa es la razon para pasarla a
+#     async, no las dos llamadas.
+#   - El peor caso sigue DENTRO del turno (turn_lock tomado): con la base
+#     tomada por Hermes, hasta ~6,7 s por operacion (medido: ~2,05 s por
+#     intento x 3 intentos + los sleeps de _retry). Ya no bloquea el loop, pero
+#     si retrasa el turno encolado tras un barge. Palanca: agrupar las
+#     operaciones del turno y acotar busy_timeout/reintentos.
 #
-# Otras menores, del mismo hallazgo: piper_sample_rate() parsea el JSON en el
-# loop por turno y es constante (cachear); opuslib.Encoder se instancia por
-# frase dentro de encode_opus_packets; y con BRIDGE_ECHO_PROBE=1, probe_dump()
-# escribe WAVs con open().write() en el loop — contamina justo la latencia que
+# LO QUE NO ES LA PALANCA (medido, para no repetir el error): reusar la conexion
+# NO rinde — connect() + los dos PRAGMA son 0,05 ms. Los segundos se los come el
+# INSERT esperando el lock. Y si alguna vez se reusa, tiene que ser
+# threading.local o check_same_thread=False, porque ahora el mismo objeto lo
+# tocan el hilo del loop y los del executor.
+#
+# MEDIDAS Y DESCARTADAS POR RUIDO: piper_sample_rate() 0,17 ms y _make_wav()
+# 0,01 ms por turno. No valen un commit. Con BRIDGE_ECHO_PROBE=1 si conviene
+# recordar que probe_dump() escribe WAVs en el loop y contamina la latencia que
 # se este midiendo.
 # ---------------------------------------------------------------------------
 
@@ -624,6 +632,24 @@ class Session:
             await asyncio.sleep(PACKET_PACE_S)
         return True
 
+    def _save_turn(self, text: str, reply: str):
+        """Guarda los dos mensajes del turno en UN solo viaje al executor.
+
+        Ojo: tiene que ser SINCRONA. Va como callable a run_in_executor via
+        _vh(); si fuera `async def`, run_in_executor devolveria la corrutina sin
+        ejecutarla y la persistencia fallaria EN SILENCIO.
+
+        Por que agrupados: con dos `await _vh(save_message, ...)` separados
+        quedaba un punto de suspension entre ambos, y Session.shutdown() cancela
+        las tareas del turno cuando se cae la conexion del device. Deb lo
+        reprodujo: cancelando ahi queda el "user" guardado sin el "assistant"
+        (message_count=1, fila impar). Antes del pase a executor esa ventana no
+        existia porque save_message era sincronico. De paso baja de 3 viajes al
+        pool por turno a 2.
+        """
+        self.vh.save_message("user", text)
+        self.vh.save_message("assistant", reply)
+
     async def _handle_barge(self):
         """Corta el turno y devuelve el audio de la interrupción al pipeline.
 
@@ -805,8 +831,7 @@ class Session:
                     "Barge-in: respuesta cortada — %d chars, %d chunks ya enviados",
                     len(reply_text), tts_chunks)
                 self.history.append({"role": "assistant", "content": reply_text})
-                await _vh(self.vh.save_message, "user", text)
-                await _vh(self.vh.save_message, "assistant", reply_text)
+                await _vh(self._save_turn, text, reply_text)
                 return
 
             await self.send_state("RESPONSE.COMPLETE")
@@ -816,8 +841,7 @@ class Session:
 
             # -- Persist --
             self.history.append({"role": "assistant", "content": reply_text})
-            await _vh(self.vh.save_message, "user", text)
-            await _vh(self.vh.save_message, "assistant", reply_text)
+            await _vh(self._save_turn, text, reply_text)
             if context_injected:
                 log.info("Telegram context: %d messages injected", context_injected)
 
