@@ -300,7 +300,7 @@ def encode_opus_packets(pcm24k: bytes) -> list[bytes]:
     # fue una regresion del firmware (la tarea del mic con mas prioridad que la
     # del parlante + una seccion critica en la ruta del audio); corregido ahi, el
     # carraspeo desaparecio. Ver el commit del firmware y la bitacora del
-    # 2026-09-22.
+    # 2026-09-21.
     #
     # Se deja en 48k igualmente: es la configuracion verificada como sana y el
     # costo es ~6 KB/s de bajada en vez de 3, irrelevante. Medido en el Mac Mini
@@ -387,7 +387,7 @@ async def ask_hermes_stream(http: ClientSession, history: list[dict]):
 
 
 # ---------------------------------------------------------------------------
-# PENDIENTE CONOCIDO (hallazgo de Deb, 2026-09-22) — voice_history bloquea el
+# PENDIENTE CONOCIDO (hallazgo de Deb, 2026-09-21) — voice_history bloquea el
 # event loop y es, por lejos, el peor offender del bridge:
 #
 #   - get_telegram_context() corre un SELECT SINCRONO en el loop cada turno, y
@@ -989,7 +989,7 @@ async def main():
     # client_max_size: el default de aiohttp es 1 MB y rechazaria con 413 antes
     # de llegar al control de MAX_UPLOAD_BYTES en handle_voice. El Cardputer
     # sube 48 kHz mono 16-bit = 96 KB/s, asi que cualquier push-to-talk de mas
-    # de ~11 s moria con 413. Hallazgo de Deb (2026-09-22), verificado.
+    # de ~11 s moria con 413. Hallazgo de Deb (2026-09-21), verificado.
     ws_app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
     ws_app["http"] = http
     ws_app.router.add_get("/", handle_ws)
