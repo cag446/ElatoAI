@@ -13,6 +13,7 @@ firmware y quien responde. Cada documento esta disponible en **Markdown**
 
 | Documento | Descripcion | Markdown | PDF |
 |---|---|---|---|
+| **Contexto del proyecto (barge-in)** | Presentacion y fuente de conocimiento del proyecto completo: de que repos se partio, arquitectura, hechos medidos, trampas verificadas y por donde integrarlo con otros proyectos open source. **Para agentes o personas que llegan sin contexto.** | [contexto-proyecto-barge-in.md](contexto-proyecto-barge-in.md) | — |
 | **Runbook: puente Hermes** | Instalacion paso a paso ejecutable por cualquier agente: API de Hermes, puente en la Mac mini (launchd), voz Piper, firmware en `DEV_MODE`, verificacion y rollback. **Empieza aqui.** | [runbook-hermes-bridge.md](runbook-hermes-bridge.md) | [runbook-hermes-bridge.pdf](runbook-hermes-bridge.pdf) |
 | **Propuesta: integracion Hermes** | Diseño y contexto del puente ESP32 ↔ Hermes: hechos verificados del protocolo con referencias archivo:linea, arquitectura, decisiones y riesgos. Contexto para LLMs que analicen el proyecto. | [propuesta-hermes-bridge.md](propuesta-hermes-bridge.md) | [propuesta-hermes-bridge.pdf](propuesta-hermes-bridge.pdf) |
 | **Port al ESP32-S3 Zero** | Adaptacion de hardware (comun a ambas configuraciones): LED WS2812 (GPIO21), boton (GPIO2), particiones de 4 MB, `platformio.ini`, mapa de pines y diagrama de conexionado. | [port-esp32-s3-zero.md](port-esp32-s3-zero.md) | [port-esp32-s3-zero.pdf](port-esp32-s3-zero.pdf) |
