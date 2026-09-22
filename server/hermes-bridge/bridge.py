@@ -71,17 +71,11 @@ SYSTEM_PROMPT = os.environ.get(
 MAX_HISTORY = int(os.environ.get("BRIDGE_MAX_HISTORY", "20"))
 TELEGRAM_CONTEXT = int(os.environ.get("BRIDGE_TELEGRAM_CONTEXT", "5"))
 
-# Volumen del parlante del device (0-100). El firmware lo aplica como ganancia
-# LINEAL en VolumeStream (volumen/100), asi que 70->50 son solo -3 dB y 70->25
-# son -9 dB.
-#
-# Medido el 2026-09-21: el eco que capta el mic es PROPORCIONAL a este volumen
-# (bajar de 50 a 25 tiro el pico del residuo 5.2 dB, contra 6.0 dB teoricos).
-# Eso prueba que el eco viaja por AIRE y no por vibracion estructural -> separar
-# fisicamente el parlante del mic va a funcionar.
-#
-# Con volumen 25 el barge-in POR VOZ funciona a DISTANCIA NORMAL (voz -24.5 dB
-# contra picos de eco -34 dB); con 50 o 70 hay que hablarle pegado al mic.
+# Volumen del parlante del device (0-100). El firmware lo aplica en VolumeStream.
+# Se baja de 70 a 50: el parlante SATURA al volumen alto y esa distorsion es la
+# fuente del eco NO LINEAL que el AEC no puede cancelar (Fase C). Menos volumen
+# = menos eco y menos distorsion, que es lo que puede habilitar el barge por voz
+# a distancia normal en vez de solo pegado al mic.
 DEVICE_VOLUME = int(os.environ.get("BRIDGE_DEVICE_VOLUME", "50"))
 
 # VAD tuning
@@ -299,7 +293,22 @@ def _resample_pcm(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
 def encode_opus_packets(pcm24k: bytes) -> list[bytes]:
     """PCM 24 kHz mono 16-bit -> list of raw Opus packets (120 ms frames)."""
     enc = opuslib.Encoder(SPK_RATE, 1, opuslib.APPLICATION_VOIP)
-    enc.bitrate = 24000
+    # 48 kbps (era 24000).
+    #
+    # OJO CON LA HISTORIA DE ESTE VALOR: se subio creyendo que el codec causaba
+    # un "carraspeo" en el parlante del device. NO ERA EL CODEC. La causa real
+    # fue una regresion del firmware (la tarea del mic con mas prioridad que la
+    # del parlante + una seccion critica en la ruta del audio); corregido ahi, el
+    # carraspeo desaparecio. Ver el commit del firmware y la bitacora del
+    # 2026-09-22.
+    #
+    # Se deja en 48k igualmente: es la configuracion verificada como sana y el
+    # costo es ~6 KB/s de bajada en vez de 3, irrelevante. Medido en el Mac Mini
+    # (i5-3210M): codificar 10 s de audio cuesta 188 ms a 24k y 192 ms a 48k, o
+    # sea 3 ms de diferencia — no cambia la latencia del turno (STT ~2.4 s,
+    # first_token ~4.8 s) ni el ritmo de envio, que es fijo por tiempo
+    # (PACKET_PACE_S), no por bitrate.
+    enc.bitrate = int(os.environ.get("BRIDGE_OPUS_BITRATE", "48000"))
     remainder = len(pcm24k) % OPUS_FRAME_BYTES
     if remainder:
         pcm24k += b"\x00" * (OPUS_FRAME_BYTES - remainder)
@@ -376,6 +385,31 @@ async def ask_hermes_stream(http: ClientSession, history: list[dict]):
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
 
+
+# ---------------------------------------------------------------------------
+# PENDIENTE CONOCIDO (hallazgo de Deb, 2026-09-22) — voice_history bloquea el
+# event loop y es, por lejos, el peor offender del bridge:
+#
+#   - get_telegram_context() corre un SELECT SINCRONO en el loop cada turno, y
+#     save_message() dos escrituras mas: 3-4 viajes a sqlite por turno.
+#   - Cada llamada abre conexion nueva y corre PRAGMA journal_mode=WAL.
+#   - Lo grave: voice_history._retry hace time.sleep(0.1*(intento+1)) ante un
+#     SQLITE_BUSY -> hasta 300 ms de bloqueo DURO del event loop, mas el
+#     busy_timeout. Y Hermes escribe ese mismo state.db todo el tiempo.
+#   - Cae con el turn_lock tomado, asi que retrasa el arranque del turno
+#     encolado despues de un barge-in.
+#
+# Comparado con esto, mover resample_to_24k/encode_opus_packets a un executor
+# (~30-60 ms por frase, 1-3% del presupuesto de una frase de 2-3 s) rinde poco.
+# Si se toca este archivo por otra razon, empezar por aca: sqlite a executor y
+# sacar el time.sleep del loop.
+#
+# Otras menores, del mismo hallazgo: piper_sample_rate() parsea el JSON en el
+# loop por turno y es constante (cachear); opuslib.Encoder se instancia por
+# frase dentro de encode_opus_packets; y con BRIDGE_ECHO_PROBE=1, probe_dump()
+# escribe WAVs con open().write() en el loop — contamina justo la latencia que
+# se este midiendo.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Per-connection session
@@ -952,7 +986,11 @@ async def main():
 
     http = ClientSession()
 
-    ws_app = web.Application()
+    # client_max_size: el default de aiohttp es 1 MB y rechazaria con 413 antes
+    # de llegar al control de MAX_UPLOAD_BYTES en handle_voice. El Cardputer
+    # sube 48 kHz mono 16-bit = 96 KB/s, asi que cualquier push-to-talk de mas
+    # de ~11 s moria con 413. Hallazgo de Deb (2026-09-22), verificado.
+    ws_app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
     ws_app["http"] = http
     ws_app.router.add_get("/", handle_ws)
     ws_app.router.add_post("/voice", handle_voice)
