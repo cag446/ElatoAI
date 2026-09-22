@@ -386,6 +386,24 @@ async def ask_hermes_stream(http: ClientSession, history: list[dict]):
                     continue
 
 
+async def _vh(fn, *args):
+    """Corre una operacion de voice_history en el executor.
+
+    voice_history hace sqlite SINCRONO: abre conexion, corre PRAGMAs y, ante un
+    SQLITE_BUSY, su _retry espera con time.sleep. Llamado desde el event loop eso
+    bloquea TODO el bridge: no lee el WebSocket (ni el BARGE del device), no
+    responde los PING del heartbeat y no atiende el REST del Cardputer.
+
+    Peor caso por operacion: 3 intentos x 500 ms de busy_timeout + 0.3 s de
+    sleeps = ~1.8 s, y son 3 operaciones por turno. Hermes escribe ese mismo
+    state.db, asi que la contencion es real y crece con su uso.
+
+    Mismo patron que ya usan transcribe(), synthesize() y _resample_pcm().
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fn, *args)
+
+
 # ---------------------------------------------------------------------------
 # PENDIENTE CONOCIDO (hallazgo de Deb, 2026-09-21) — voice_history bloquea el
 # event loop y es, por lejos, el peor offender del bridge:
@@ -450,7 +468,7 @@ class Session:
         await self.send_json({"type": "server", "msg": msg})
 
     async def greet(self):
-        self.vh.start_session()
+        await _vh(self.vh.start_session)
         await self.send_json({
             "type": "auth",
             "volume_control": DEVICE_VOLUME,
@@ -689,7 +707,7 @@ class Session:
             self.history = self.history[-MAX_HISTORY:]
 
             # Inject recent Telegram context for cross-channel awareness
-            telegram_msgs = self.vh.get_telegram_context(TELEGRAM_CONTEXT)
+            telegram_msgs = await _vh(self.vh.get_telegram_context, TELEGRAM_CONTEXT)
             context_injected = len(telegram_msgs)
             if telegram_msgs:
                 self.history = telegram_msgs + self.history
@@ -787,8 +805,8 @@ class Session:
                     "Barge-in: respuesta cortada — %d chars, %d chunks ya enviados",
                     len(reply_text), tts_chunks)
                 self.history.append({"role": "assistant", "content": reply_text})
-                self.vh.save_message("user", text)
-                self.vh.save_message("assistant", reply_text)
+                await _vh(self.vh.save_message, "user", text)
+                await _vh(self.vh.save_message, "assistant", reply_text)
                 return
 
             await self.send_state("RESPONSE.COMPLETE")
@@ -798,8 +816,8 @@ class Session:
 
             # -- Persist --
             self.history.append({"role": "assistant", "content": reply_text})
-            self.vh.save_message("user", text)
-            self.vh.save_message("assistant", reply_text)
+            await _vh(self.vh.save_message, "user", text)
+            await _vh(self.vh.save_message, "assistant", reply_text)
             if context_injected:
                 log.info("Telegram context: %d messages injected", context_injected)
 
@@ -847,6 +865,11 @@ def _rest_session(device: str) -> dict:
                 log.exception("[voice] closing expired session for %s", key)
             del _rest_sessions[key]
             log.info("[voice] session expired: %s", key)
+    # NOTA: las dos llamadas a voice_history que quedan aca (close_session y
+    # start_session) son las unicas sincronas que sobreviven: _rest_session() no
+    # es async. No se tocaron porque corren UNA VEZ por sesion REST, no por
+    # turno, asi que no estan en el camino caliente. Todas las de por-turno ya
+    # pasan por _vh().
     sess = _rest_sessions.get(device)
     if sess is None:
         vh = VoiceHistory(device)
@@ -908,7 +931,7 @@ async def handle_voice(request: web.Request) -> web.Response:
     history = sess["history"] + [{"role": "user", "content": text}]
     history = history[-MAX_HISTORY:]
 
-    telegram_msgs = sess["vh"].get_telegram_context(TELEGRAM_CONTEXT)
+    telegram_msgs = await _vh(sess["vh"].get_telegram_context, TELEGRAM_CONTEXT)
     try:
         reply, llm_s = await ask_hermes(request.app["http"], telegram_msgs + history)
     except Exception:
@@ -925,8 +948,8 @@ async def handle_voice(request: web.Request) -> web.Response:
     # Commit only once the turn succeeded end to end, so a failed reply does
     # not poison the next turn's context.
     sess["history"] = history + [{"role": "assistant", "content": reply}]
-    sess["vh"].save_message("user", text)
-    sess["vh"].save_message("assistant", reply)
+    await _vh(sess["vh"].save_message, "user", text)
+    await _vh(sess["vh"].save_message, "assistant", reply)
 
     wav = _make_wav(pcm_tts, tts_rate)
     log.info(
@@ -963,7 +986,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     finally:
         # A.1: el turno corre como tarea aparte → cancelarlo al cerrar la conexión
         await session.shutdown()
-        session.vh.close_session()
+        await _vh(session.vh.close_session)
         log.info("Device disconnected (MAC %s)", mac)
     return ws
 
