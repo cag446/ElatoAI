@@ -31,8 +31,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/tmp/hermes-bridge.log</string>
+  <string>/Users/wilbot/Library/Logs/hermes-bridge.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/hermes-bridge.err</string>
+  <string>/Users/wilbot/Library/Logs/hermes-bridge.err</string>
 </dict>
 </plist>

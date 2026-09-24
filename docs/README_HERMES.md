@@ -82,5 +82,5 @@ generar su PDF para mantenerlos sincronizados.
 | Audio subida | PCM crudo 16 kHz mono 16-bit (frames binarios WS) |
 | Audio bajada | Opus 24 kHz mono, frames de 120 ms, 1 paquete cada 110 ms |
 | Fin de frase | VAD webrtcvad en el puente (800 ms de silencio) |
-| Servicio | launchd `com.elato.hermes-bridge` (`KeepAlive`), logs en `/tmp/hermes-bridge.log` |
+| Servicio | launchd `com.elato.hermes-bridge` (`KeepAlive`), logs en `~/Library/Logs/hermes-bridge.{log,err}` (lo util esta en el `.log`) |
 | Firmware | `DEV_MODE` + `VOICE_SERVER_DENO`; flasheo con `--no-stub` (ya en `platformio.ini`) |

@@ -221,7 +221,7 @@ La parte difícil. `Aec.h` / `Aec.cpp` implementan:
 |---|---|---|
 | Conversación completa local, sin nube | ✅ | — |
 | **Barge por botón** | ✅ **Siempre** | Ninguna |
-| **Barge por voz** | ✅ **Condicionado** | Usuario a **20-30 cm del micrófono** a volumen 70; o a distancia normal con el volumen bajo a 25 |
+| **Barge por voz** | ✅ **Condicionado** | Usuario a **20-30 cm del micrófono** a volumen 70 (esto sí está verificado en hardware). ~~A distancia normal con el volumen en 25~~: **NO está medido** — se dedujo de que el eco es proporcional al volumen, pero nunca se probó un barge a volumen 25. Tratarlo como hipótesis. |
 | Barge por voz manos libres a volumen alto | ❌ | Requiere separación física (ver abajo) |
 
 ### Los números medidos — esta es la parte reusable
