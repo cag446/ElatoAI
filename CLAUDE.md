@@ -23,7 +23,7 @@ Después, según el caso:
 | Evaluar alternativas OSS | `docs/investigacion-integracion-oss.md` |
 | Entender el bridge | `docs/propuesta-hermes-bridge.md`, `server/hermes-bridge/README.md` |
 | Instalar o desplegar | `docs/runbook-hermes-bridge.md` |
-| Flashear | `docs/firmware-binarios-y-flasheo.md` |
+| Flashear o **recompilar desde cero** | `docs/firmware-binarios-y-flasheo.md` — la IP va por `HERMES_SERVER_IP`, no se edita código. Ojo: las dependencias están fijadas con `^`, así que un build futuro puede no dar el mismo binario; por eso existe el respaldo del `.bin` |
 | Conexionado | `docs/conexionado-por-componente.md` |
 
 ## Reglas del proyecto

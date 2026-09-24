@@ -63,12 +63,59 @@ Hay dos formas de guardar/flashear el firmware. Es la duda mas comun:
 
 ---
 
+## Reconstruir el firmware desde cero, partiendo del fork
+
+El repositorio tiene **todo lo necesario para recompilar**: las fuentes, el
+`platformio.ini` con sus dependencias, la tabla de particiones y hasta el
+`startup.mp3`. Y la IP del servidor esta **parametrizada**, asi que no hay que
+editar ningun archivo:
+
+```bash
+git clone -b feature/esp32-s3-zero-port https://github.com/cag446/ElatoAI
+cd ElatoAI/firmware-arduino
+HERMES_SERVER_IP=192.168.100.23 pio run -t upload --upload-port /dev/ttyACM0
+```
+
+La variable la consume `scripts/hermes_server_ip.py`, que la inyecta como
+`-D HERMES_SERVER_IP` en el build (ver el comentario de `src/Config.cpp:45`).
+
+### Por que el respaldo del `.bin` sigue haciendo falta
+
+Las dependencias estan fijadas con **`^`** — por ejemplo
+`links2004/WebSockets@^2.4.1` —, que permite actualizaciones **menores**. Si
+dentro de un año una de esas librerias cambia algo, `pio run` va a traer una
+version distinta de la que se uso hoy y **el binario resultante puede no ser
+identico** al que esta funcionando.
+
+Por eso el respaldo con el `.bin` ya compilado no es redundante con el codigo
+fuente: el repositorio te da la **receta**, el respaldo te da el **resultado que
+sabes que funciona**. Ante un problema raro despues de recompilar, comparar
+contra el binario del respaldo es la forma mas rapida de saber si la causa fue
+un cambio propio o una dependencia que se movio sola.
+
+Si en algun momento hace falta reproducir el build **exactamente**, hay que
+cambiar los `^` por versiones exactas en `platformio.ini`.
+
 ## Respaldos generados
 
-En el home del usuario hay **dos juegos de respaldos**, uno por cada version del
-firmware. **No son intercambiables: hablan con servidores distintos.**
+En el home del usuario hay varios juegos de respaldos. **No son intercambiables.**
 
-### Version Hermes bridge (la actual — usar esta)
+### ✅ Con barge-in (2026-09-24) — ESTE ES EL VIGENTE
+
+`~/elatoai-firmware-respaldo-2026-09-24.{tar.gz,zip}`, y copia fuera de la VM en
+la Mac mini (`~/Respaldos/elatoai/`).
+
+Paquete autocontenido: `LEEME.md`, `flash.sh` (graba el merged en 0x0 con
+`--no-stub`), `verificar.sh` + `SHA256SUMS`, los cinco binarios con sus offsets,
+y `docs/`. Binario compilado el **2026-09-21 20:46**, con `AEC_ENABLED=1`
+(`AEC_FRAME=64`, `AEC_FILTER=512`) y el arreglo del carraspeo.
+
+Incluye las **Fases A, B y C**: barge-in por boton y por voz.
+
+> ⚠️ **Los respaldos que siguen son ANTERIORES AL BARGE-IN.** Restaurarlos hace
+> perder el corte por boton y por voz. Se conservan como historico.
+
+### Version Hermes bridge del 2026-07-18 (historica, SIN barge-in)
 
 Firmware que habla con `bridge.py` en la Mac Mini (`$HERMES_SERVER_IP:8000`, ver [[runbook-hermes-bridge]]),
 pipeline local: VAD -> Whisper -> Hermes -> Piper. Sin nube.
