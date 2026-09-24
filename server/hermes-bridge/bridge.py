@@ -462,6 +462,11 @@ class Session:
         self.barge_src = ""            # "device" (lo detectó el ESP32) | "server"
         self.barge_buf = bytearray()   # audio del mic durante SPEAKING (será la frase nueva)
         self.pre_buffer = b""          # audio reencolado tras un barge (se antepone al próximo chunk)
+        # §4.3: BARGE que llega ANTES de empezar a hablar (durante STT/LLM, donde
+        # `speaking` todavía es False). `barge_event` no sirve ahí porque
+        # `request_barge` lo descartaba; ver el comentario de `request_barge`.
+        self.cancel_pending = False
+        self.cancel_src = ""
         self.turn_lock = asyncio.Lock()  # A.1: serializa un turno a la vez
         self.turn_task = None
         self.turn_tasks: set = set()   # ajuste 1: turnos encolados detrás del lock (no se descartan)
@@ -501,7 +506,14 @@ class Session:
 
         if self.speaking:
             # A.3: este audio todavía NO es una frase nueva — se acumula.
-            # Sin AEC viene "sucio" (voz del usuario + eco de Deb); el AEC es Fase E.
+            #
+            # Desde `1cdbae2` (firmware, 2026-09-15) el device NO sube mic en
+            # SPEAKING: la compuerta es `deviceState == LISTENING`. Entonces lo
+            # único que puede caer acá es audio POSTERIOR a un corte local del
+            # device (mandó BARGE y ya pasó a LISTENING con el amplificador
+            # apagado), o sea **voz del usuario**, no eco. Por eso `_handle_barge`
+            # lo reencola para los dos `via`. El comentario viejo decía que venía
+            # "sucio, con eco de Deb": era cierto con el firmware anterior.
             self.barge_buf += chunk
             if len(self.barge_buf) > BARGE_BUF_MAX_BYTES:
                 del self.barge_buf[:len(self.barge_buf) - BARGE_BUF_MAX_BYTES]
@@ -548,7 +560,20 @@ class Session:
         if self.barge_event.is_set():
             return
         if not self.speaking:
-            log.info("BARGE (%s) ignorado: el bridge no está reproduciendo", source)
+            # §4.3: `speaking` recién se pone en True DESPUÉS del STT, y el STT es
+            # la fase más larga del turno (2,5–7 s). El firmware manda BARGE
+            # también en PROCESSING (`main.cpp:100`, `Audio.cpp:493`), así que
+            # acá caían todos los botonazos del "pensando". Antes se ignoraban: el
+            # device se iba a LISTENING creyendo que había cortado y el bridge
+            # igual sintetizaba y mandaba la respuesta que el usuario quiso
+            # cancelar. Ahora se marca y `process_utterance` aborta el turno.
+            if self.turn_task is not None and not self.turn_task.done():
+                self.cancel_pending = True
+                self.cancel_src = source
+                log.info("BARGE (%s) durante el turno pero antes de hablar "
+                         "(STT/LLM): turno marcado para cancelar", source)
+            else:
+                log.info("BARGE (%s) ignorado: no hay turno en curso", source)
             return
         self.barge_src = source
         self.barge_event.set()
@@ -560,9 +585,12 @@ class Session:
         except (json.JSONDecodeError, TypeError, ValueError):
             return
         if msg.get("type") == "server_action" and msg.get("msg") == "BARGE":
-            # via: "button" (Fase B, press-then-talk: el buffer es eco de Deb)
-            #      "voice"  (Fase C, AEC on-device: el buffer es voz del usuario)
+            # via: "button" (Fase B) | "voice" (Fase C, AEC on-device).
             # Sin via -> firmware viejo -> se asume boton.
+            # El `via` hoy es SOLO informativo (logs): con el firmware actual el
+            # contenido de `barge_buf` es voz del usuario en los dos casos, asi
+            # que `_handle_barge` lo reencola igual. Ver §4.1 del informe de
+            # mejora 2026-09-22 y el comentario de `feed_audio`.
             via = msg.get("via", "button")
             log.info("Device BARGE recibido (via=%s): cortando la respuesta", via)
             self.request_barge("device-voice" if via == "voice" else "device")
@@ -650,6 +678,28 @@ class Session:
         self.vh.save_message("user", text)
         self.vh.save_message("assistant", reply)
 
+    async def _abort_pending_turn(self, text: str) -> None:
+        """§4.3: aborta el turno cuando llegó un BARGE ANTES de empezar a hablar.
+
+        Caso típico: el usuario aprieta el botón durante el "pensando" (STT, de
+        2,5 a 7 s). El device ya cortó y volvió a LISTENING por su cuenta, así
+        que acá solo hay que no seguir: nada de LLM, nada de TTS, nada de
+        `RESPONSE.CREATED`.
+
+        No se manda `RESPONSE.COMPLETE` si el BARGE lo originó el device — mismo
+        criterio que `_handle_barge`: el device ya re-escucha solo y un estado de
+        más lo haría transicionar al pedo. Si lo que el usuario dijo después de
+        apretar cerró por VAD, ya quedó encolado como turno nuevo detrás del
+        `turn_lock` y se responde eso, que es lo que se quería.
+        """
+        src = self.cancel_src
+        self.cancel_pending = False
+        self.cancel_src = ""
+        log.info("Turno cancelado por BARGE (%s) antes de empezar a hablar — "
+                 "transcripción descartada: %r", src or "server", (text or "")[:80])
+        if not src.startswith("device"):
+            await self.send_state("BARGE")
+
     async def _handle_barge(self):
         """Corta el turno y devuelve el audio de la interrupción al pipeline.
 
@@ -658,27 +708,35 @@ class Session:
           `RESPONSE.COMPLETE`: el device ya volvió a escuchar por su cuenta.
         - Si el BARGE lo mandó el propio device (ya cortó local), no se repite.
         - A.3: lo que se dijo encima se reencola (`pre_buffer`) y se procesa como
-          la frase nueva — SOLO para el barge por voz (src="server", audio ya
-          cancelado por el AEC). Si el barge vino del BOTON (src="device") el
-          buffer es puro eco de Deb (press-then-talk: el usuario aun no hablo)
-          y se descarta.
+          la frase nueva, para los DOS `via` (boton y voz).
+
+        §4.1 (informe de mejora 2026-09-22) — por que se reencola tambien el
+        boton, que antes se descartaba:
+
+        El descarte se escribio cuando el firmware subia mic durante SPEAKING
+        (`26e1c12`/`8a55dc6`, 15-09 00:07): ahi el buffer era, efectivamente, eco
+        de Deb, y reencolarlo hacia que Whisper transcribiera a Deb como si fuera
+        el usuario. Pero 21 h despues `1cdbae2` cambio la compuerta del mic a
+        `deviceState == LISTENING`, y el bridge no se actualizo.
+
+        Con el firmware actual, cuando el device hace barge manda BARGE y pasa a
+        LISTENING con el amplificador apagado: TODO lo que llega despues es voz
+        del usuario. Descartarlo tiraba el comienzo de la pregunta. Cuanto:
+        1,15 s (`36864 B`, log de `1cdbae2`) y 2,9 s (`93184 B`, `Aec.h:98`),
+        que es lo que tarda el bridge en reaccionar al barge (§4.2). O sea que
+        Whisper venia recibiendo la pregunta sin el principio en CADA barge por
+        boton.
         """
         src = self.barge_src
         self.barge_event.clear()
         self.barge_src = ""
+        self.cancel_pending = False    # el barge real manda: cualquier cancel pendiente sobra
+        self.cancel_src = ""
         self.speaking = False
         leftover = bytes(self.barge_buf)
         self.barge_buf = bytearray()
         probe_log("eco (SPEAKING, barge)", leftover)
         probe_dump("eco-barge", leftover)
-        if leftover and src == "device":
-            # Barge por BOTON (press-then-talk): el buffer es solo el eco de Deb.
-            # Reencolarlo haria que Whisper transcriba a Deb como si fuera el
-            # usuario. Se descarta. Un barge por VOZ (src="device-voice") lo
-            # CONSERVA: es la voz del usuario ya cancelada por el AEC del device.
-            log.info("Barge-in (device/button): %d B de eco descartados (no es voz del usuario)",
-                     len(leftover))
-            leftover = b""
         if leftover:
             self.pre_buffer = leftover + self.pre_buffer
         if not src.startswith("device"):
@@ -720,9 +778,19 @@ class Session:
 
         await self.send_state("AUDIO.COMMITTED")
 
+        # §4.3: bandera rancia de un turno anterior cortaría este turno sin que
+        # nadie lo haya pedido. Mismo criterio que el "Ajuste 3" de `barge_event`.
+        self.cancel_pending = False
+        self.cancel_src = ""
+
         try:
             # -- STT --
             text, latencies["stt"] = await loop.run_in_executor(None, transcribe, pcm)
+            # §4.3: el botón durante el "pensando" llega acá. Se corta antes de
+            # gastar el LLM y el TTS en una respuesta que el usuario ya canceló.
+            if self.cancel_pending:
+                await self._abort_pending_turn(text)
+                return
             if not text:
                 log.info("Empty transcription, back to listening.")
                 await self.send_state("RESPONSE.COMPLETE")
@@ -753,6 +821,12 @@ class Session:
             # respuesta con cero audio.
             self.barge_event.clear()
             self.barge_src = ""
+            # §4.3: segundo control, por si el BARGE llegó mientras se traía el
+            # contexto de Telegram. A partir de la línea siguiente `speaking` es
+            # True y el corte vuelve a manejarlo `barge_event`.
+            if self.cancel_pending:
+                await self._abort_pending_turn(text)
+                return
             self.speak_gen += 1
             speak_gen = self.speak_gen
             self.speaking = True
@@ -860,6 +934,8 @@ class Session:
             self.barge_event.clear()
             self.barge_src = ""
             self.barge_buf = bytearray()
+            self.cancel_pending = False   # §4.3: idem para el cancel diferido
+            self.cancel_src = ""
             await self.send_state("RESPONSE.ERROR")
 
 
