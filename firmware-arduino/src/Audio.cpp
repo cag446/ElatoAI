@@ -413,8 +413,10 @@ void webSocketEvent(WStype_t type, const uint8_t *payload, size_t length)
             } else if (strcmp((char*)msg.c_str(), "BARGE") == 0) {
                 // Fase C: el bridge detecto voz encima de la respuesta (barge por
                 // voz). Cortar YA, sin el delay de 1 s. Mismo efecto que el boton
-                // (Fase B), pero disparado por el bridge. Hoy inerte hasta que el
-                // AEC/deteccion server-side este activo.
+                // (Fase B), pero disparado por el bridge. Hoy INERTE y no por
+                // pendiente: la deteccion de voz se hace en el device (Aec.cpp) y
+                // la server-side quedo descartada por diseño. El bridge solo manda
+                // BARGE si el corte lo origino el (src="server"), que hoy no pasa.
                 Serial.println("BARGE (server): cutting playback, back to listening");
                 transitionToListening();
             } else if (strcmp((char*)msg.c_str(), "SESSION.END") == 0) {

@@ -32,7 +32,9 @@ constexpr int LAG_MIN   = 0;
 constexpr int LAG_MAX   = 3200;   // 200 ms a 16 kHz
 constexpr int LAG_STEP  = 16;     // 1 ms de resolucion
 constexpr int LAG_BINS  = (LAG_MAX - LAG_MIN) / LAG_STEP;
-constexpr int MEASURE_FRAMES = 120;  // ~1 s de audio para promediar
+constexpr int MEASURE_FRAMES = 120;  // frames CONTADOS, no de reloj: solo 1 de
+                                     // cada REFINE_EVERY (4) y solo con energia
+                                     // en el mic -> minimo 120x4x4 ms = 1,92 s
 
 // Retardo por defecto: 1440 muestras = 90 ms, MEDIDO en hardware el 2026-09-14
 // ([AEC] retardo medido: 1440 muestras, pico 16.53 vs media 5.15). Es una
@@ -61,8 +63,8 @@ static int   lockedDelay = AEC_DEFAULT_DELAY;   // se cancela desde el arranque
 //   voz del usuario                     : -34.8 med, -29.4 p90 -> debe pasar
 constexpr float DETECT_ABS_DB    = -32.0f;
 constexpr float DETECT_MARGIN_DB = 10.0f;
-constexpr int   DETECT_FRAMES    = 40;   // 40 x 8 ms = 320 ms de voz sostenida
-constexpr int   SETTLE_FRAMES    = 60;   // ~0.5 s para que el filtro converja
+constexpr int   DETECT_FRAMES    = 40;   // 40 x 4 ms = 160 ms de voz sostenida
+constexpr int   SETTLE_FRAMES    = 60;   // 60 x 4 ms = 240 ms para que el filtro converja
 static float floorDb = -60.0f;
 static int   voiceRun = 0;
 static float residualPeakDb = -120.0f;   // medicion del criterio de exito

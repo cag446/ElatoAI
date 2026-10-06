@@ -124,9 +124,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Frame del AEC en muestras a 16 kHz. 128 = 8 ms.
+// Frame del AEC en muestras a 16 kHz. 64 = 4 ms.
+// (Hasta 2026-10-05 este comentario decia "128 = 8 ms", de la config previa.)
 constexpr int AEC_FRAME = 64;
-// Cola de eco que cubre el filtro, en muestras a 16 kHz. 1024 = 64 ms.
+// Cola de eco que cubre el filtro, en muestras a 16 kHz. 512 = 32 ms.
+// (Hasta 2026-10-05 decia "1024 = 64 ms", de la config previa.) OJO: el
+// retardo medido vario 90/130/146 ms entre arranques; si el real se aleja
+// mas de ~32 ms de lockedDelay, queda FUERA de la cola. Ver §4.4 del informe
+// de mejora (docs/informe-mejora-2026-09-22.md).
 // Con la referencia ya pre-retardada, solo tiene que cubrir la INCERTIDUMBRE
 // del retardo, no el retardo entero.
 constexpr int AEC_FILTER = 512;

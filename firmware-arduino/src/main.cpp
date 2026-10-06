@@ -17,7 +17,10 @@ esp_err_t getErr = ESP_OK;
 // Main Thread -> onButtonLongPressUpEventCb -> enterSleep()
 // Main Thread -> onButtonDoubleClickCb -> enterSleep()
 // Touch Task -> touchTask -> enterSleep()
-// Main Thread -> loop() (inactivity timeout) -> enterSleep()
+// (NO hay timeout de inactividad: loop() solo procesa sleepRequested y OTA.
+//  Este comentario venia del upstream y decia lo contrario; corregido
+//  2026-10-05. Ademas el bridge nunca manda SESSION.END: la placa solo se
+//  duerme por el boton, largo o doble.)
 void enterSleep() {
   Serial.println("Going to sleep...");
 
