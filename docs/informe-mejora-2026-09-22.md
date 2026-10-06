@@ -7,7 +7,7 @@
 > **Convención:** **[V]** verificado contra código o fuente primaria · **[H]** hipótesis derivada del código, sin medición en hardware.
 
 > **Nota al incorporarlo al repo (2026-09-24).** Se commitea textual, sin editar.
-> Estado de sus recomendaciones a esa fecha:
+> Estado de sus recomendaciones (actualizado 2026-10-05):
 >
 > | Ítem | Estado |
 > |---|---|
@@ -15,8 +15,11 @@
 > | **§4.3** — el botón durante el STT no cancelaba nada | ✅ **Aplicado** (`f6708b3`) |
 > | §3.2 / §4.7 — comentarios desactualizados en `bridge.py` | ✅ Aplicado (`f6708b3`) |
 > | **§4.2** — cancelar la tarea del turno (reacción de 1-3 s) | ⏳ Pendiente a propósito: abre ventanas de cancelación como la que ya falló en `_save_turn`; va en commit propio |
-> | §3.2 — comentarios de `Aec.h` / `Aec.cpp` con el doble del valor real | ⏳ Pendiente (firmware) |
-> | §4.4, §4.5, §4.6, carrera de §4.7 | ⏳ Pendientes (firmware, requieren reflashear) |
+> | §3.2 — comentarios de `Aec.h` / `Aec.cpp` con el doble del valor real | ✅ **Aplicado** (`4db32c3`, 2026-10-05). Solo comentarios: binario idéntico, sin reflashear |
+> | §3.1 — comentarios contradictorios de la PSRAM en `platformio.ini` | ✅ **Aplicado** (`4db32c3`): unificados, causa declarada como no aislada |
+> | §4.1 y §4.3 — verificación en hardware | ✅ **Verificados** con la placa el 2026-10-05 |
+> | §4.4, §4.5, §4.6, carrera de §4.7 | ⏳ Pendientes (firmware, requieren reflashear). Agruparlos en un solo reflasheo |
+> | Hallazgo nuevo: `CORE_DEBUG_LEVEL=5` (logs *verbose* del core) en el build de producción | ⏳ Pendiente: bajarlo cambia el binario, va con el próximo reflasheo |
 > | §6 — correcciones a `investigacion-integracion-oss.md` y `contexto-proyecto-barge-in.md` | ⏳ Pendientes |
 >
 > Verificación de los fixes aplicados: `tests/test_barge_state.py` (14/14 PASS),
