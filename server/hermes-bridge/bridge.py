@@ -22,9 +22,12 @@ Improvements over baseline:
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import shlex
 import signal
 import struct
 import subprocess
@@ -53,6 +56,34 @@ HERMES_URL = os.environ.get(
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 HERMES_MODEL = os.environ.get("HERMES_MODEL", "hermes-agent")
 HERMES_TIMEOUT_S = float(os.environ.get("HERMES_TIMEOUT_S", "60"))  # improved: 60s (was 120)
+
+# --- Tareas largas por voz (2026-10-08) --------------------------------------
+# Si Hermes pasa LONG_TASK_SILENCE_S segundos SIN TEXTO, el bridge avisa por voz,
+# suelta el parlante y deja la tarea corriendo; al terminar, el resultado va a
+# Telegram con `hermes send` (recomendado por Deb: reusa las credenciales del
+# gateway y deja el mensaje en SU conversacion de Telegram, via
+# gateway/mirror.py::mirror_to_session). Ver la clase HermesPump.
+LONG_TASK_SILENCE_S = float(os.environ.get("BRIDGE_LONG_TASK_SILENCE_S", "25"))
+LONG_TASK_PHRASE = os.environ.get(
+    "BRIDGE_LONG_TASK_PHRASE",
+    "Este proceso es largo, mejor mirá los resultados en Telegram.")
+HERMES_CLI = os.environ.get(
+    "HERMES_CLI",
+    os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python") + " -m hermes_cli.main")
+LONG_TASK_TARGET = os.environ.get("BRIDGE_LONG_TASK_TARGET", "telegram")  # home channel
+TELEGRAM_MAX_CHARS = 3900          # Telegram corta en 4096
+_LONG_TASKS: set = set()           # vivas por FUERA de las sesiones (ver _spawn_long_task)
+
+# --- Tokens por dispositivo (2026-10-08) -------------------------------------
+# Cada aparato (ESP32, Cardputer, ...) tiene su propia clave. El registro vive
+# FUERA de los repos y guarda solo el SHA-256 de cada clave. Se administra con
+# devices_admin.py. Modos:
+#   transition (default): acepta a todos y LOGUEA quien no tiene clave valida.
+#   enforce:              rechaza (401) a quien no tenga clave valida y apaga
+#                         /api/generate_auth_token.
+AUTH_MODE = os.environ.get("BRIDGE_AUTH_MODE", "transition").strip().lower()
+DEVICES_FILE = os.environ.get(
+    "BRIDGE_DEVICES_FILE", os.path.expanduser("~/.config/hermes-bridge/devices.json"))
 
 # [IMPROVED] Default "base" instead of "small" — 4x faster on Intel dual-core
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
@@ -386,6 +417,192 @@ async def ask_hermes_stream(http: ClientSession, history: list[dict]):
                     continue
 
 
+class HermesPump:
+    """Lee el stream de Hermes en una tarea propia y entrega el texto por una cola.
+
+    Para detectar una TAREA LARGA hay que medir el tiempo SIN TEXTO. Mientras
+    Hermes usa herramientas manda `: keepalive` cada 10 s y eventos
+    `hermes.tool.progress`, pero no contenido (verificado en
+    gateway/platforms/api_server_openai_routes.py). `ask_hermes_stream` ignora
+    esos frames, asi que esperar el proximo token con limite de tiempo mide
+    justo "cuanto hace que Deb no dice nada", y los keepalives evitan que el
+    `sock_read` de 60 s corte mientras trabaja.
+
+    Como la lectura vive en su propia tarea, si el turno de voz se suelta, la
+    tarea puede seguir leyendo hasta el final en segundo plano (`wait_all`).
+    """
+
+    def __init__(self, http: ClientSession, history: list[dict]):
+        self._q: asyncio.Queue = asyncio.Queue()
+        self._parts: list[str] = []
+        self.error: Exception | None = None
+        self.task = asyncio.create_task(self._run(http, history))
+
+    async def _run(self, http: ClientSession, history: list[dict]):
+        try:
+            async for tok in ask_hermes_stream(http, history):
+                self._parts.append(tok)
+                self._q.put_nowait(tok)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # se re-lanza en raise_if_failed / se reporta en wait_all
+            self.error = exc
+        finally:
+            self._q.put_nowait(None)          # fin del stream (o error)
+
+    async def next_token(self, timeout: float):
+        """Proximo fragmento de texto; None = fin. TimeoutError si no llega a tiempo."""
+        return await asyncio.wait_for(self._q.get(), timeout)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    def raise_if_failed(self):
+        if self.error is not None:
+            raise self.error
+
+    async def wait_all(self) -> tuple[str, Exception | None]:
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            self.error = self.error or RuntimeError("la tarea se cancelo")
+        return self.text(), self.error
+
+    def cancel(self):
+        """Corta la lectura: cierra el stream HTTP (equivale al aclose() de antes)."""
+        if not self.task.done():
+            self.task.cancel()
+
+
+def _format_long_task_msg(user_text: str, body: str | None, err: Exception | None) -> str:
+    head = "🎙️ Pedido por voz: «%s»\n\n" % user_text
+    if body is None:
+        why = (str(err)[:300] if err else "Hermes no devolvio texto.")
+        return head + "No se pudo completar: " + why
+    if len(head) + len(body) > TELEGRAM_MAX_CHARS:
+        body = (body[:TELEGRAM_MAX_CHARS - len(head) - 90].rstrip()
+                + "\n\n[…respuesta recortada: el texto completo quedo en el historial]")
+    return head + body
+
+
+async def _send_telegram(text: str) -> bool:
+    """Manda `text` al home channel de Telegram con `hermes send`.
+
+    `hermes send` reusa las credenciales del gateway (el bridge NO guarda el
+    token del bot) y deja el mensaje en la conversacion de Telegram de Deb, asi
+    tiene el contexto si Carlos le responde. El texto va por stdin (`-f -`).
+    """
+    cmd = shlex.split(HERMES_CLI) + ["send", "--to", LONG_TASK_TARGET, "--file", "-"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _out, err = await asyncio.wait_for(proc.communicate(text.encode("utf-8")), timeout=120)
+    except Exception:
+        log.exception("[tarea larga] no se pudo ejecutar `hermes send`")
+        return False
+    if proc.returncode != 0:
+        log.warning("[tarea larga] `hermes send` fallo (rc=%s): %s",
+                    proc.returncode, err.decode("utf-8", "replace")[-300:])
+        return False
+    return True
+
+
+def _save_long_task_turn(mac: str, session_id: str, user_text: str, reply: str):
+    """Guarda pregunta + respuesta de una tarea larga en la sesion de voz original.
+
+    SINCRONA a proposito (va al executor via _vh): si fuera `async def`,
+    run_in_executor devolveria la corrutina sin ejecutarla y no se guardaria
+    nada, sin error. Usa un VoiceHistory propio con el session_id capturado,
+    porque la sesion del device puede haberse cerrado mientras Hermes trabajaba
+    (un No PONG en reposo cierra la conexion y llama a close_session).
+    """
+    vh = VoiceHistory(mac)
+    vh.session_id = session_id
+    vh.save_message("user", user_text)
+    vh.save_message("assistant", reply)
+
+
+async def _finish_long_task(pump: "HermesPump", user_text: str, mac: str, session_id):
+    t0 = time.monotonic()
+    full, err = await pump.wait_all()
+    body = full.strip() or None
+    if err is not None:
+        body = None
+    log.info("[tarea larga] termino %.0f s despues del aviso — %s",
+             time.monotonic() - t0,
+             ("%d chars, enviando a Telegram" % len(body)) if body else "SIN resultado (%s)" % err)
+    ok = await _send_telegram(_format_long_task_msg(user_text, body, err))
+    log.info("[tarea larga] Telegram: %s", "enviado" if ok else "NO se pudo enviar")
+    if session_id:
+        reply = body if body else "[tarea larga sin resultado: %s]" % (str(err)[:200] if err else "vacia")
+        await _vh(_save_long_task_turn, mac, session_id, user_text, reply)
+
+
+def _spawn_long_task(pump: "HermesPump", user_text: str, mac: str, session_id):
+    """Deja la tarea larga corriendo por FUERA de la Session del device.
+
+    No va en Session.turn_tasks: Session.shutdown() cancela esas tareas cuando
+    el device se desconecta, y el ESP32 se desconecta seguido en reposo (los No
+    PONG). La tarea larga tiene que sobrevivir a eso.
+    """
+    task = asyncio.create_task(_finish_long_task(pump, user_text, mac, session_id))
+    _LONG_TASKS.add(task)
+    task.add_done_callback(_LONG_TASKS.discard)
+    return task
+
+
+# --- Tokens por dispositivo ---------------------------------------------------
+_devices_cache: dict = {"mtime": None, "devices": {}}
+
+
+def _load_devices() -> dict:
+    """Registro de dispositivos, recargado si el archivo cambia (sin reiniciar)."""
+    try:
+        mtime = os.stat(DEVICES_FILE).st_mtime
+    except FileNotFoundError:
+        return {}
+    if _devices_cache["mtime"] != mtime:
+        try:
+            with open(DEVICES_FILE, encoding="utf-8") as f:
+                _devices_cache["devices"] = json.load(f).get("devices", {})
+            _devices_cache["mtime"] = mtime
+        except Exception:
+            log.exception("[auth] no se pudo leer %s", DEVICES_FILE)
+            return {}
+    return _devices_cache["devices"]
+
+
+def identify_device(token: str) -> str | None:
+    """Nombre del dispositivo dueño de `token`, o None. Compara SHA-256 en tiempo constante."""
+    if not token:
+        return None
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    for name, info in _load_devices().items():
+        if info.get("enabled", True) and hmac.compare_digest(digest, str(info.get("sha256", ""))):
+            return name
+    return None
+
+
+def _bearer(request: web.Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
+
+def check_device_auth(request: web.Request, where: str, who: str) -> tuple[str | None, bool]:
+    """(nombre del dispositivo o None, si se lo deja pasar). Nunca loguea claves."""
+    name = identify_device(_bearer(request))
+    if name:
+        log.info("[auth] %s: dispositivo '%s' (%s, %s)", where, name, who, request.remote)
+        return name, True
+    if AUTH_MODE == "enforce":
+        log.warning("[auth] %s: RECHAZADO, sin clave valida (%s, %s)", where, who, request.remote)
+        return None, False
+    log.warning("[auth] %s: sin clave valida — aceptado por MODO TRANSICION (%s, %s)",
+                where, who, request.remote)
+    return None, True
+
+
 async def _vh(fn, *args):
     """Corre una operacion de voice_history en el executor.
 
@@ -678,6 +895,37 @@ class Session:
         self.vh.save_message("user", text)
         self.vh.save_message("assistant", reply)
 
+    async def _start_long_task(self, pump: HermesPump, text: str, src_rate: int,
+                               speak_gen: int) -> None:
+        """Tarea larga: avisa por voz, suelta el parlante y deja a Hermes trabajando.
+
+        La tarea de fondo se lanza PRIMERO, asi corre pase lo que pase con el
+        aviso (barge, desconexion). Ella guarda pregunta + respuesta completa en
+        el historial y manda el resultado a Telegram. Aca solo se cierra el turno
+        de voz: el parlante queda libre y el turn_lock se suelta al volver.
+        """
+        log.info("Tarea larga: %.0f s sin texto de Hermes -> aviso por voz y "
+                 "resultado por Telegram", LONG_TASK_SILENCE_S)
+        _spawn_long_task(pump, text, self.mac, self.vh.session_id)
+        self.history.append({"role": "assistant", "content": LONG_TASK_PHRASE})
+        loop = asyncio.get_running_loop()
+        interrupted = False
+        try:
+            raw, _ = await loop.run_in_executor(None, synthesize, LONG_TASK_PHRASE)
+            if self.barge_event.is_set():
+                interrupted = True
+            else:
+                packets = encode_opus_packets(resample_to_24k(raw, src_rate))
+                await self.send_state("RESPONSE.CREATED")
+                interrupted = not await self._send_packets(packets)
+        except Exception:
+            log.exception("Tarea larga: no se pudo decir el aviso por voz")
+        if interrupted:
+            await self._handle_barge()
+            return
+        await self.send_state("RESPONSE.COMPLETE")
+        self.speak_task = asyncio.create_task(self._end_speaking_grace(speak_gen))
+
     async def _abort_pending_turn(self, text: str) -> None:
         """§4.3: aborta el turno cuando llegó un BARGE ANTES de empezar a hablar.
 
@@ -831,9 +1079,18 @@ class Session:
             speak_gen = self.speak_gen
             self.speaking = True
             interrupted = False
-            stream = ask_hermes_stream(self.http, self.history)
+            long_task = False
+            pump = HermesPump(self.http, self.history)
             try:
-                async for token in stream:
+                while True:
+                    try:
+                        token = await pump.next_token(LONG_TASK_SILENCE_S)
+                    except asyncio.TimeoutError:
+                        long_task = True       # Deb lleva LONG_TASK_SILENCE_S sin decir nada
+                        break
+                    if token is None:
+                        pump.raise_if_failed()
+                        break
                     if self.barge_event.is_set():
                         interrupted = True
                         break
@@ -875,7 +1132,7 @@ class Session:
                             tts_chunks += 1
 
                 # Flush remaining text after stream ends (cortable también: A.2)
-                remaining = "" if interrupted else sentence_buf.strip()
+                remaining = "" if (interrupted or long_task) else sentence_buf.strip()
                 if remaining:
                     raw, _ = await loop.run_in_executor(None, synthesize, remaining)
                     # Ajuste 4 (flush final): BARGE durante la síntesis → ni
@@ -894,10 +1151,16 @@ class Session:
                         else:
                             interrupted = True
             finally:
-                # Cierra el SSE de Hermes (libera la conexión).
+                # Cierra el SSE de Hermes (libera la conexión), SALVO en una tarea
+                # larga: ahí la lectura sigue en segundo plano (_start_long_task).
                 # Ajuste 2: `speaking` NO se apaga acá — sigue True durante la
                 # gracia de fin de respuesta (ver `_end_speaking_grace`).
-                await stream.aclose()
+                if not long_task or interrupted:
+                    pump.cancel()
+
+            if long_task and not interrupted:
+                await self._start_long_task(pump, text, src_rate, speak_gen)
+                return
 
             if interrupted:
                 await self._handle_barge()
@@ -944,6 +1207,11 @@ class Session:
 # ---------------------------------------------------------------------------
 async def handle_token(request: web.Request) -> web.Response:
     mac = request.query.get("macAddress", "?")
+    if AUTH_MODE == "enforce":
+        # Con claves por dispositivo este endpoint ya no reparte nada: cada aparato
+        # trae la suya, cargada en su configuracion.
+        log.warning("Token request from MAC %s: RECHAZADO (modo enforce)", mac)
+        return web.json_response({"error": "disabled"}, status=404)
     log.info("Token request from MAC %s", mac)
     return web.json_response({"token": AUTH_TOKEN})
 
@@ -995,6 +1263,9 @@ async def handle_voice(request: web.Request) -> web.Response:
     """
     t_start = time.monotonic()
     device = request.query.get("device", "cardputer")
+    _dev, allowed = check_device_auth(request, "voice", device)
+    if not allowed:
+        return web.json_response({"error": "unauthorized"}, status=401)
 
     raw = await request.read()
     if not raw:
@@ -1032,11 +1303,33 @@ async def handle_voice(request: web.Request) -> web.Response:
     history = history[-MAX_HISTORY:]
 
     telegram_msgs = await _vh(sess["vh"].get_telegram_context, TELEGRAM_CONTEXT)
+    # Tareas largas (2026-10-08): misma regla que el WS. Se lee en streaming para
+    # medir el tiempo SIN TEXTO; si pasa LONG_TASK_SILENCE_S, se contesta con el
+    # aviso y la tarea sigue en segundo plano hasta Telegram.
+    t_llm = time.monotonic()
+    pump = HermesPump(request.app["http"], telegram_msgs + history)
+    long_task = False
     try:
-        reply, llm_s = await ask_hermes(request.app["http"], telegram_msgs + history)
+        while True:
+            try:
+                tok = await pump.next_token(LONG_TASK_SILENCE_S)
+            except asyncio.TimeoutError:
+                long_task = True
+                break
+            if tok is None:
+                pump.raise_if_failed()
+                break
+        reply = pump.text().strip()
     except Exception:
+        pump.cancel()
         log.exception("[voice] Hermes failed")
         return web.json_response({"error": "llm failed"}, status=502)
+    llm_s = time.monotonic() - t_llm
+    if long_task:
+        log.info("[voice] tarea larga (%s): %.0f s sin texto -> aviso y resultado por Telegram",
+                 device, LONG_TASK_SILENCE_S)
+        _spawn_long_task(pump, text, device, sess["vh"].session_id)
+        reply = LONG_TASK_PHRASE
 
     try:
         pcm_tts, tts_s = await loop.run_in_executor(None, synthesize, reply)
@@ -1048,8 +1341,9 @@ async def handle_voice(request: web.Request) -> web.Response:
     # Commit only once the turn succeeded end to end, so a failed reply does
     # not poison the next turn's context.
     sess["history"] = history + [{"role": "assistant", "content": reply}]
-    await _vh(sess["vh"].save_message, "user", text)
-    await _vh(sess["vh"].save_message, "assistant", reply)
+    if not long_task:   # en una tarea larga, guarda la tarea de fondo (con la respuesta real)
+        await _vh(sess["vh"].save_message, "user", text)
+        await _vh(sess["vh"].save_message, "assistant", reply)
 
     wav = _make_wav(pcm_tts, tts_rate)
     log.info(
@@ -1066,9 +1360,12 @@ async def handle_voice(request: web.Request) -> web.Response:
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
+    mac = request.headers.get("X-Device-Mac", "?")
+    _dev, allowed = check_device_auth(request, "ws", mac)
+    if not allowed:
+        return web.Response(status=401, text="unauthorized")
     ws = web.WebSocketResponse(heartbeat=30.0)
     await ws.prepare(request)
-    mac = request.headers.get("X-Device-Mac", "?")
     log.info("Device connected (MAC %s)", mac)
 
     session = Session(ws, request.app["http"], mac)
@@ -1143,6 +1440,10 @@ async def main():
              "/api/generate_auth_token", WS_PORT, HTTP_PORT)
     log.info("REST voice endpoint: POST http://0.0.0.0:%d/voice", WS_PORT)
     log.info("Hermes endpoint: %s (model %s)", HERMES_URL, HERMES_MODEL)
+    log.info("Auth de dispositivos: modo %s, %d registrados en %s",
+             AUTH_MODE, len(_load_devices()), DEVICES_FILE)
+    log.info("Tareas largas: aviso a los %.0f s sin texto, resultado por `hermes send --to %s`",
+             LONG_TASK_SILENCE_S, LONG_TASK_TARGET)
     log.info("Whisper model: %s | Piper voice: %s", WHISPER_MODEL, PIPER_VOICE)
 
     try:
