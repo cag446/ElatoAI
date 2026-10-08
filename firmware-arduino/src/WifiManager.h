@@ -60,6 +60,11 @@ class WIFIMANAGER {
     uint64_t startApTimeMillis = 0;     // Time when the AP was started
     uint32_t timeoutApMillis = 120000;  // Timeout of an AP when no client is connected, if timeout reached rescan, tryconnect or createAP
 
+    // Clave del bridge recien cambiada desde el portal: se reinicia para aplicarla
+    // (los encabezados del WebSocket se arman una sola vez, al arrancar).
+    bool restartPending = false;
+    uint32_t restartAtMillis = 0;
+
     String softApName;                  // Name of the soft AP if created, default to ESP_XXXXXXXX if empty
     String softApPass;                  // Password for the soft AP, default to no password (empty)
 

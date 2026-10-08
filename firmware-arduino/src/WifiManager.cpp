@@ -373,6 +373,11 @@ uint8_t WIFIMANAGER::getApEntry() {
  * @details regulary check if the connection is up&running, try to reconnect or create a fallback AP
  */
 void WIFIMANAGER::loop() {
+  // Va antes de la salida temprana de abajo, que deja pasar solo 1 chequeo cada 10 s.
+  if (restartPending && (int32_t)(millis() - restartAtMillis) >= 0) {
+    logMessage("[WIFI] Reiniciando para aplicar la clave nueva del bridge\n");
+    ESP.restart();
+  }
   if (millis() - lastWifiCheckMillis < intervalWifiCheckMillis) return;
   lastWifiCheckMillis = millis();
 
@@ -677,6 +682,62 @@ void WIFIMANAGER::attachWebServer(WebServer * srv) {
     if (!addWifi(jsonBuffer["apName"].as<String>(), jsonBuffer["apPass"].as<String>())) {
       resp->send(500, "application/json", "{\"message\":\"Unable to process data\"}");
     } else {resp->send(200, "application/json", "{\"message\":\"New network added\"");}
+  });
+
+  // Clave del bridge (2026-10-08): cada aparato tiene la suya y el firmware la
+  // manda como "Authorization: Bearer" (Audio.cpp, websocketSetup). Esta ruta
+  // SOLO ESCRIBE: ninguna ruta la devuelve. Para cambiarla hay que dar la actual,
+  // porque este portal no pide contraseña y cualquiera en la WiFi podria pisarla
+  // y dejar el parlante desconectado. Si no hay ninguna guardada, no se pide.
+#if ASYNC_WEBSERVER == true
+  webServer->on((apiPrefix + "/token").c_str(), HTTP_POST, [&](AsyncWebServerRequest * request){}, NULL,
+    [&](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
+    JsonDocument jsonBuffer;
+    if (deserializeJson(jsonBuffer, (const char*)data, len)) {
+      request->send(400, "application/json", "{\"message\":\"JSON invalido\"}");
+      return;
+    }
+    auto resp = request;
+#else
+  webServer->on((apiPrefix + "/token").c_str(), HTTP_POST, [&]() {
+    JsonDocument jsonBuffer;
+    if (webServer->args() != 1 || deserializeJson(jsonBuffer, webServer->arg(0))) {
+      webServer->send(400, "application/json", "{\"message\":\"JSON invalido\"}");
+      return;
+    }
+    auto resp = webServer;
+#endif
+    String current = jsonBuffer["current"] | "";
+    String token = jsonBuffer["token"] | "";
+    current.trim();
+    token.trim();
+    if (token.length() < 16 || token.length() > 128) {
+      resp->send(422, "application/json", "{\"message\":\"La clave nueva debe tener entre 16 y 128 caracteres\"}");
+      return;
+    }
+    for (size_t i = 0; i < token.length(); i++) {
+      char c = token[i];
+      if (!(isalnum((unsigned char)c) || c == '-' || c == '_')) {
+        resp->send(422, "application/json", "{\"message\":\"La clave solo puede tener letras, numeros, guiones y guiones bajos\"}");
+        return;
+      }
+    }
+    Preferences authPrefs;
+    authPrefs.begin("auth", true);
+    String stored = authPrefs.getString("auth_token", "");
+    authPrefs.end();
+    if (stored.length() > 0 && current != stored) {
+      resp->send(403, "application/json", "{\"message\":\"La clave actual no coincide\"}");
+      return;
+    }
+    authPrefs.begin("auth", false);
+    authPrefs.putString("auth_token", token);
+    authPrefs.end();
+    authTokenGlobal = token;
+    logMessage("[WIFI] Clave del bridge actualizada (no se muestra). Reinicio en 2 s\n");
+    resp->send(200, "application/json", "{\"message\":\"Guardado, reiniciando\"}");
+    restartPending = true;
+    restartAtMillis = millis() + 2000;
   });
 
 #if ASYNC_WEBSERVER == true
@@ -1047,6 +1108,18 @@ void WIFIMANAGER::attachUI() {
         </div>
 
         <div class="card">
+            <h2>🔑 Clave del bridge</h2>
+            <p>Cada aparato tiene su propia clave para hablar con el bridge. Se escribe ac&aacute; y no se puede volver a leer.</p>
+            <form id="tokenForm" onsubmit="saveToken(event)">
+                <label for="tokenCurrent">Clave actual (la de f&aacute;brica es <code>elato-local-token</code>)</label>
+                <input type="password" id="tokenCurrent" autocomplete="off">
+                <label for="tokenNew">Clave nueva</label>
+                <input type="password" id="tokenNew" required minlength="16" maxlength="128" autocomplete="off">
+                <button type="submit">Guardar y reiniciar</button>
+            </form>
+        </div>
+
+        <div class="card">
             <h2>✅ Saved Networks</h2>
             <div id="savedNetworks" class="network-list"></div>
         </div>
@@ -1223,6 +1296,26 @@ void WIFIMANAGER::attachUI() {
                 
                 // Refresh saved networks list
                 await loadSavedNetworks();
+            } catch (error) {
+                showStatus(error.message, 'error');
+            }
+        }
+
+        async function saveToken(event) {
+            event.preventDefault();
+            const current = document.getElementById('tokenCurrent').value;
+            const token = document.getElementById('tokenNew').value.trim();
+            try {
+                showStatus('Guardando la clave...', 'info');
+                const response = await fetch(`${API_BASE}/wifi/token`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ current, token }),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.message || 'No se pudo guardar la clave');
+                document.getElementById('tokenForm').reset();
+                showStatus('Clave guardada. El aparato se reinicia en unos segundos.', 'success');
             } catch (error) {
                 showStatus(error.message, 'error');
             }
