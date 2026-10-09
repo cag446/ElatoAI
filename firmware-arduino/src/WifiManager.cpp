@@ -1111,7 +1111,7 @@ void WIFIMANAGER::attachUI() {
             <h2>🔑 Clave del bridge</h2>
             <p>Cada aparato tiene su propia clave para hablar con el bridge. Se escribe ac&aacute; y no se puede volver a leer.</p>
             <form id="tokenForm" onsubmit="saveToken(event)">
-                <label for="tokenCurrent">Clave actual (la de f&aacute;brica es <code>elato-local-token</code>)</label>
+                <label for="tokenCurrent">Clave actual (la &uacute;ltima que cargaste)</label>
                 <input type="password" id="tokenCurrent" autocomplete="off">
                 <label for="tokenNew">Clave nueva</label>
                 <input type="password" id="tokenNew" required minlength="16" maxlength="128" autocomplete="off">
