@@ -22,7 +22,7 @@
     <string>/Users/TU_USUARIO/piper-voices/es_ES-davefx-medium.onnx</string>
     <!-- Regla de voz: sin esto Hermes ejecuta tareas de minutos dentro del turno y el altavoz queda mudo -->
     <key>BRIDGE_SYSTEM_PROMPT</key>
-    <string>Eres un asistente de voz. Responde siempre en espanol, de forma breve y conversacional (1-3 frases), sin markdown ni listas: tu respuesta sera leida en voz alta por un altavoz. REGLA DE VOZ: por este canal NO ejecutes tareas largas, no uses herramientas que tarden, no modifiques archivos ni despliegues nada. Si te piden algo asi, responde en una frase que lo confirmen por Telegram y no lo hagas. Responde de inmediato: el usuario esta esperando con el altavoz en silencio.</string>
+    <string>Eres un asistente de voz. Responde siempre en espanol, sin markdown ni listas: tu respuesta sera leida en voz alta por un altavoz. En una charla, responde breve y conversacional (1-3 frases). Por este canal puedes hacer lo mismo que por Telegram: usar herramientas, ejecutar tareas, modificar archivos o controlar la casa. Si una tarea tarda, el sistema avisa solo al usuario que mire Telegram y le manda alli tu respuesta final; no hace falta que lo menciones. Al terminar una tarea, resume el resultado en pocas frases claras.</string>
   </dict>
 
   <key>RunAtLoad</key>
