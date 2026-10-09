@@ -22,10 +22,9 @@ local (Mac mini) que transcribe con faster-whisper, consulta al agente
 ```flowchart
    ESP32 (DEV_MODE)                      Mac mini
         │                                   │
-        │ ① GET http://IP:3000/api/         │
-        │    generate_auth_token            │──► responde {"token":"..."}
-        │                                   │
-        │ ② WS ws://IP:8000/                │
+        │ ① WS ws://IP:8000/                │
+        │    Authorization: Bearer <clave>  │──► valida la clave del aparato
+        │                                   │    (401 si no; ver nota abajo)
         │    (PCM 16 kHz crudo ──────────►) │
         │                                   ├─ VAD (webrtcvad)
         │                                   ├─ STT (faster-whisper)
@@ -33,8 +32,14 @@ local (Mac mini) que transcribe con faster-whisper, consulta al agente
         │                                   ├─ TTS por frases (Piper)
         │ (◄────────── Opus 24 kHz + JSON)  ├─ Opus + pacing 110 ms
         ▼                                   ▼
-   altavoz MAX98357A                   log en /tmp/hermes-bridge.log
+   altavoz MAX98357A                   log en ~/Library/Logs/hermes-bridge.log
 ```
+
+> **Desde 2026-10-08 cada aparato tiene su propia clave** y el bridge rechaza
+> al que no la tenga (`BRIDGE_AUTH_MODE=enforce`); el endpoint
+> `generate_auth_token` del puerto 3000 quedo apagado (404). Si Hermes tarda
+> mas de 25 s, el parlante avisa y el resultado llega por Telegram. Todo eso
+> esta en [[claves-y-tareas-largas]].
 
 El pipeline usa **LLM en modo streaming**: el puente empieza a sintetizar voz
 al recibir la primera frase completa del modelo (boundary en `.!?\n`), sin
@@ -142,6 +147,8 @@ Salida esperada (la primera vez tarda ~2 s: carga el modelo Whisper):
 ... Loading faster-whisper model 'base'...
 ... Whisper model loaded in 1.8s
 ... Bridge ready: ws://0.0.0.0:8000/  token http://0.0.0.0:3000/api/generate_auth_token
+... Auth de dispositivos: modo enforce, 2 registrados en ~/.config/hermes-bridge/devices.json
+... Tareas largas: aviso a los 25 s sin texto, resultado por `hermes send --to telegram`
 ... Hermes endpoint: http://127.0.0.1:8642/v1/chat/completions (model hermes-agent)
 ... Whisper model: base | Piper voice: /Users/.../es_ES-davefx-medium.onnx
 ```
@@ -149,9 +156,13 @@ Salida esperada (la primera vez tarda ~2 s: carga el modelo Whisper):
 Verificar los endpoints desde otra maquina de la LAN:
 
 ```bash
-# Token
-curl "http://$HERMES_SERVER_IP:3000/api/generate_auth_token?macAddress=TEST"
-# esperado: {"token": "elato-local-token"}
+# Token compartido viejo: apagado en modo enforce
+curl -s -o /dev/null -w "%{http_code}\n" "http://$HERMES_SERVER_IP:3000/api/generate_auth_token"
+# esperado: 404 (en modo transition responde {"token": "elato-local-token"})
+
+# Sin clave, el bridge rechaza
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "http://$HERMES_SERVER_IP:8000/voice?device=prueba"
+# esperado: 401
 
 # Health (nuevo en version de produccion)
 curl http://$HERMES_SERVER_IP:3000/health
@@ -179,7 +190,10 @@ Hermes: Bien, gracias. ¿En qué te puedo ayudar? | STT=0.4s first_token=1.2s ch
 | `BRIDGE_SYSTEM_PROMPT` | (prompt en español) | Personalidad del asistente |
 | `VAD_SILENCE_MS` | `800` | Silencio que cierra la frase |
 | `VAD_AGGRESSIVENESS` | `1` | Sensibilidad del VAD (0-3; subir si corta frases a mitad) |
-| `BRIDGE_AUTH_TOKEN` | `elato-local-token` | Token devuelto al ESP32 (no se valida) |
+| `BRIDGE_AUTH_TOKEN` | `elato-local-token` | Clave compartida vieja: solo la entrega `generate_auth_token` en modo `transition`. **No sirve para entrar** |
+| `BRIDGE_AUTH_MODE` | `transition` | `enforce` (vigente) rechaza a quien no tenga clave propia. Ver [[claves-y-tareas-largas]] |
+| `BRIDGE_DEVICES_FILE` | `~/.config/hermes-bridge/devices.json` | Hashes de las claves (`devices_admin.py`) |
+| `BRIDGE_LONG_TASK_SILENCE_S` | `25` | Segundos sin texto de Hermes para avisar y mandar el resultado por Telegram |
 | `BRIDGE_MAX_HISTORY` | `20` | Mensajes de historial que se mantienen en memoria |
 | `BRIDGE_TELEGRAM_CONTEXT` | `5` | Mensajes de Telegram inyectados como contexto (requiere VoiceHistory completo) |
 
@@ -213,9 +227,15 @@ cd firmware-arduino
 pio run -t upload --upload-port /dev/ttyACM0
 ```
 
-> **NOTA:** El token de Elato guardado en NVS no estorba: en DEV_MODE el
-> firmware pide un token nuevo al puente solo si NVS esta vacio, y el puente
-> acepta cualquier token (no valida el header). No hace falta borrar NVS.
+> **NOTA (actualizada 2026-10-08):** el bridge **si** valida la clave. Despues
+> de flashear, crear la clave del aparato (`devices_admin.py add <nombre>`) y
+> cargarla en `http://<IP>/wifi` → "Clave del bridge". Ojo: la "clave actual"
+> puede ser el JWT viejo de la nube de Elato y no `elato-local-token` (el
+> firmware solo pide clave si la NVS esta vacia). Procedimiento y salida en
+> [[claves-y-tareas-largas]].
+>
+> Despues de flashear por USB el Zero suele quedar en modo descarga: hay que
+> **desenchufarlo y enchufarlo sin tocar BOOT** para que arranque.
 
 ---
 
@@ -245,7 +265,7 @@ cd <repo>/server/hermes-bridge
 cp com.elato.hermes-bridge.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.elato.hermes-bridge.plist
 # logs:
-tail -f /tmp/hermes-bridge.log
+tail -f ~/Library/Logs/hermes-bridge.log
 ```
 
 Con `KeepAlive` el puente se reinicia solo si se cae, y arranca al encender la
@@ -304,7 +324,11 @@ configuracion Elato con un solo comando.
 | `Piper voice not found` al arrancar | Falta la voz o la ruta es otra | Paso 4; ajustar `PIPER_VOICE` |
 | `Hermes HTTP 401` en el log | `HERMES_API_KEY` no coincide | Usar la misma `API_SERVER_KEY` de `~/.hermes/.env` |
 | `Hermes HTTP` con connection refused | Hermes no corre o API no habilitada | Paso 1; `hermes gateway` activo |
-| El ESP32 no pide token | IP mal puesta en `Config.cpp` o firewall | Verificar paso 6 y el firewall de macOS (permitir Python) |
+| El ESP32 no conecta y el log dice `[auth] ws: RECHAZADO` | Sin clave o con una que no esta registrada | Cargarla en `http://<IP>/wifi` ([[claves-y-tareas-largas]]) |
+| El portal dice "La clave actual no coincide" | La guardada no es la que crees (puede ser el JWT de Elato) | Ver la trampa en [[claves-y-tareas-largas]] |
+| El Cardputer dice "Clave rechazada" | Clave mal tipeada, revocada o borrada | `devices_admin.py list`; si se perdio, `delete` + `add --tecleable` |
+| Telegram: "No se pudo completar: …" | Hermes fallo (la causa va en el mensaje: filtro de DeepSeek, saldo, etc.) | Segun la causa; el detalle en `~/.hermes/logs/errors.log` |
+| El ESP32 no conecta al bridge | IP mal puesta en el build o firewall | Verificar paso 6 y el firewall de macOS (permitir Python) |
 | Conecta pero nunca transcribe | VAD no detecta voz o ruido de fondo alto | Bajar `VAD_AGGRESSIVENESS` a 0 o subir a 2; revisar el micro |
 | Transcribe frases vacias | Doble-VAD (no deberia ocurrir con `vad_filter=False`) | Verificar que se usa la version de produccion del bridge |
 | El altavoz corta a mitad de la primera frase | VAD_SILENCE_MS demasiado bajo | Subir `VAD_SILENCE_MS` a 1000 |
@@ -324,7 +348,8 @@ MAC MINI:
   ~/.hermes/.env             -> API_SERVER_ENABLED=true, API_SERVER_KEY=...
   server/hermes-bridge/      -> bridge.py + voice_history.py + requirements.txt + plist
   ~/piper-voices/            -> voz TTS (.onnx + .onnx.json)
-  puertos: 3000 (token+health), 8000 (WS+health), 8642 (Hermes, solo local)
+  puertos: 3000 (health; token apagado en enforce), 8000 (WS+/voice+health), 8642 (Hermes, solo local)
+  claves:  python3 devices_admin.py add|list|revoke|enable|delete  (hashes en ~/.config/hermes-bridge/devices.json)
 
 HEALTH CHECK:
   curl http://$HERMES_SERVER_IP:3000/health  ->  {"status": "ok"}
@@ -339,11 +364,13 @@ SERVICIO:
   launchctl load   ~/Library/LaunchAgents/com.elato.hermes-bridge.plist
   launchctl stop   com.elato.hermes-bridge   # parada temporal (KeepAlive lo relanza)
   launchctl unload ~/Library/LaunchAgents/com.elato.hermes-bridge.plist  # desactivar
-  tail -f /tmp/hermes-bridge.log
+  tail -f ~/Library/Logs/hermes-bridge.log
 
 LOG POR TURNO:
+  [auth] ws: dispositivo 'esp32-parlante' (MAC, IP)
   User: <texto>
   Hermes: <respuesta> | STT=0.4s first_token=1.2s chunks=2
+  (tarea larga) Tarea larga: 25 s sin texto ... / [tarea larga] Telegram: enviado
 
 ROLLBACK: Config.h -> ELATO_MODE + VOICE_SERVER_CLOUDFLARE y reflashear.
 ```

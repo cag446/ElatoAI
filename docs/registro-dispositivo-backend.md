@@ -1,5 +1,11 @@
 # Registro del dispositivo y backend — ElatoAI sobre ESP32-S3 Zero
 
+> **Nota 2026-10-09:** esto describe el registro de la **nube de Elato**
+> (configuracion original). Con el bridge local, la placa ya no usa este JWT:
+> cada aparato tiene una clave propia que se carga en su portal. Ver
+> [[claves-y-tareas-largas]]. Ojo: una placa que paso por la nube puede seguir
+> teniendo este JWT guardado en NVS como "clave actual".
+
 ---
 
 ## Descripcion general

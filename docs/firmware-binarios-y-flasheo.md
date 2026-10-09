@@ -100,7 +100,31 @@ cambiar los `^` por versiones exactas en `platformio.ini`.
 
 En el home del usuario hay varios juegos de respaldos. **No son intercambiables.**
 
-### ✅ Con barge-in (2026-09-24) — ESTE ES EL VIGENTE
+### ⚠️ El firmware que corre hoy (2026-10-09) NO tiene respaldo empaquetado
+
+Desde el 2026-10-08 el parlante corre un firmware **posterior** al respaldo del
+09-24: agrega el recuadro "Clave del bridge" en el portal (`POST
+/api/wifi/token`) y baja `CORE_DEBUG_LEVEL` a 1 (commits `3b3846c` y `a170fc5`).
+Se reconstruye desde el fork con la Opcion A. Falta regenerar el paquete de
+respaldo con este binario.
+
+**Antes de restaurar el respaldo del 09-24, leer esto:**
+
+- Su binario merged cubre `0x0`–`0x3F0000` y trae la zona NVS (`0x9000`–`0xE000`)
+  **en blanco** (verificado 2026-10-09): grabarlo **borra la WiFi y la clave**
+  guardadas en la placa.
+- Ese firmware no tiene el recuadro de la clave: con la NVS vacia pide clave a
+  `GET :3000/api/generate_auth_token`, que en modo `enforce` da 404. **El
+  parlante no podria conectarse.** Para usarlo hay que poner antes el bridge en
+  `BRIDGE_AUTH_MODE=transition` (ver `claves-y-tareas-largas.md`).
+
+Respaldo de la flash **completa** tal como estaba antes del flasheo del
+2026-10-08 (incluye NVS con la WiFi y el JWT viejo de Elato; no copiarlo a otros
+lados): `~/elatoai-flash-previo-2026-10-08_210441/flash-completo.bin` (4 MB,
+`SHA256SUMS` al lado). Grabarlo en `0x0` deja la placa exactamente como estaba
+ese dia.
+
+### ✅ Con barge-in (2026-09-24) — ultimo respaldo empaquetado
 
 `~/elatoai-firmware-respaldo-2026-09-24.{tar.gz,zip}`, y copia fuera de la VM en
 la Mac mini (`~/Respaldos/elatoai/`).
@@ -177,8 +201,12 @@ Recompila y graba los 4 binarios en sus offsets automaticamente:
 
 ```bash
 cd firmware-arduino
-pio run -t upload --upload-port /dev/ttyACM0
+HERMES_SERVER_IP=192.168.100.23 pio run -t upload --upload-port /dev/ttyACM0
 ```
+
+No toca la NVS: la WiFi y la clave del bridge siguen guardadas. Despues del
+upload el Zero suele **quedar en modo descarga** (cada reset por USB lo vuelve a
+dejar ahi): desenchufar y enchufar **sin tocar BOOT** para que arranque.
 
 ### Opcion B — grabar el binario merged (respaldo, de un tiro)
 
@@ -246,6 +274,9 @@ Salida esperada: `Wrote 0x13c6f0 bytes ... ready to flash to offset 0x0`.
 |---|---|---|
 | `Packet content transfer stopped` al subir | Falta `--no-stub` (USB nativo del Zero) | Ya esta en `platformio.ini`; si usas esptool a mano, anade `--no-stub` |
 | `Could not open /dev/ttyACM0` | El puerto se re-enumero tras un upload | Reconecta el USB-C y reintenta |
+| Tras grabar, el log serie muestra `boot:0x0 (DOWNLOAD(USB/UART0))` | El reset por USB del Zero lo deja en modo descarga | Desenchufar y enchufar sin BOOT |
+| `read_flash` con `--no-stub` falla pasados los 2 MB (`CRC or checksum was invalid`) | Sin stub, la ROM asume flash de 2 MB | Leer con la libreria de esptool llamando antes `flash_set_parameters(<tamaño real>)`. Paso con el Cardputer (8 MB) el 2026-10-08; en el Zero (4 MB) `read_flash 0 0x400000` anduvo directo |
+| `read_flash` sin `--no-stub` falla con `Corrupt data` | El stub sobre USB nativo | Usar `--no-stub` |
 | `No module named 'rich_click'` con `esptool.py` | Esa copia de esptool no tiene deps | Usa el comando `esptool` (v5.x) instalado por separado |
 | La placa arranca en bucle tras grabar solo `firmware.bin` | Bootloader/particiones ausentes o incompatibles | Graba el **merged** a `0x0` |
 | Bootloader no arranca (S3) | Se grabo el bootloader en `0x1000` | En el S3 el bootloader va en **0x0** |
@@ -262,7 +293,11 @@ OFFSETS (ESP32-S3):
   0x10000  firmware.bin        <- la app
 
 RESPALDOS (~/):
-  [Hermes bridge — LA ACTUAL]
+  [Flash completa previa al 2026-10-08 — incluye NVS]
+  elatoai-flash-previo-2026-10-08_210441/flash-completo.bin  -> todo, offset 0x0
+  [Con barge-in, 2026-09-24 — ultimo paquete; SIN clave del bridge]
+  elatoai-firmware-respaldo-2026-09-24/   -> flash.sh (merged a 0x0, BORRA NVS)
+  [Hermes bridge 2026-07-18 — historica, SIN barge-in]
   ElatoAI_ESP32_S3_Bridge.py.bin         -> app sola, offset 0x10000
   ElatoAI_ESP32_S3_Bridge.py_merged.bin  -> todo, offset 0x0
   [Elato cloud — historica]
@@ -275,4 +310,8 @@ FLASHEAR:
   esptool --chip esp32s3 write-flash 0x10000 <app>   # solo app
 
 SIEMPRE en el Zero: --no-stub (USB nativo). Modo descarga: BOOT + conectar USB-C.
+Tras grabar: desenchufar y enchufar SIN BOOT para que arranque.
+Firmware de HOY (con clave del bridge): reconstruir desde el fork (Opcion A).
+OJO: el merged del 09-24 borra la NVS (WiFi + clave) y no funciona con el
+bridge en modo enforce.
 ```

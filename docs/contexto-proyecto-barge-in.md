@@ -7,7 +7,8 @@
 > **fuente de conocimiento**: qué se construyó, sobre qué se apoya, qué se midió,
 > qué funciona, qué no, y dónde están las costuras para enchufar otra cosa.
 >
-> Última actualización: **2026-09-22**. Licencia del repo: MIT.
+> Última actualización: **2026-10-09** (claves por dispositivo y tareas largas,
+> ver `claves-y-tareas-largas.md`). Licencia del repo: MIT.
 
 ---
 
@@ -121,7 +122,15 @@ De `firmware-arduino/platformio.ini`:
   `{"type":"server_action","msg":"BARGE","via":"button|voice"}` en sentido
   device → servidor.
 
-**Puertos**: 8000 WS (audio), 3000 HTTP (token), 8642 el LLM (solo localhost).
+**Puertos**: 8000 WS (audio) y `POST /voice` (Cardputer), 3000 HTTP (health;
+el token compartido quedó apagado), 8642 el LLM (solo localhost).
+
+**Autenticación y tareas largas (desde 2026-10-08)**: cada aparato manda su
+propia clave en `Authorization: Bearer` y el bridge rechaza al que no la tenga.
+Si Hermes pasa 25 s sin texto (usando herramientas), el parlante avisa y el
+resultado llega por Telegram. Nada de esto toca el barge-in: el aviso es un
+turno normal (`RESPONSE.CREATED` … `RESPONSE.COMPLETE`) y el botón lo corta
+igual. Detalle en `claves-y-tareas-largas.md`.
 
 ---
 
@@ -345,7 +354,8 @@ proyecto parecido.
 | **Unidad soldada con mic y parlante separados** | Pendiente. Es lo único que daría volumen alto **y** barge manos libres a la vez |
 | **Timeouts de PONG en reposo** | 17 en ocho días, ninguno durante un turno. Evidencia apunta a la rama IDLE del firmware (`delay()` largo, espera bloqueante de I2S, o modem-sleep de WiFi que no despierta al task de red), no al servidor. Sin confirmar |
 | `_rest_session` a async | El barrido de expirados corre en cada turno REST |
-| El bridge no valida el `Bearer` | `BRIDGE_AUTH_TOKEN` no se chequea. Aceptable en LAN, **no** si se expone |
+| ~~El bridge no valida el `Bearer`~~ | **Resuelto 2026-10-08**: clave propia por aparato, modo `enforce`. Sigue sin TLS: aceptable en LAN, **no** si se expone |
+| `DEBUG_ESP_PORT` en `platformio.ini` | Hace que WebSockets imprima y haga `flush()` por cada paquete de audio. Sacarlo cambia los tiempos del envío: hacerlo aparte y volver a medir el barge-in |
 | `voice_history.py` en el repo es un **stub** | La implementación real (persistencia + contexto) corre solo en la máquina local |
 
 ---
@@ -418,6 +428,9 @@ conseguir y no está escrito en la documentación de ninguna de las librerías.
 | `firmware-arduino/platformio.ini` | Dependencias, particiones de 4 MB |
 | `server/hermes-bridge/bridge.py` | Todo el servidor |
 | `server/hermes-bridge/README.md` | Arranque rápido y puertos |
+| `server/hermes-bridge/devices_admin.py` | Alta, baja y revocación de las claves por aparato |
+| `server/hermes-bridge/tests/test_long_task_and_auth.py` | Pruebas de tareas largas y claves (Hermes y Telegram simulados) |
+| `docs/claves-y-tareas-largas.md` | Claves por aparato, tareas largas, causa de los errores, instrucciones de voz |
 | `docs/runbook-hermes-bridge.md` | Instalación paso a paso |
 | `docs/propuesta-hermes-bridge.md` | Diseño del puente con referencias `archivo:línea` |
 | `docs/conexionado-por-componente.md` | Conexionado componente por componente |

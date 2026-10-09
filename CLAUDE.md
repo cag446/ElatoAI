@@ -23,6 +23,7 @@ Después, según el caso:
 | Evaluar alternativas OSS | `docs/investigacion-integracion-oss.md` |
 | Entender el bridge | `docs/propuesta-hermes-bridge.md`, `server/hermes-bridge/README.md` |
 | Instalar o desplegar | `docs/runbook-hermes-bridge.md` |
+| Claves por aparato, tareas largas, instrucciones de voz | `docs/claves-y-tareas-largas.md` — el bridge corre en `enforce`: **un aparato sin clave propia no entra** |
 | Flashear o **recompilar desde cero** | `docs/firmware-binarios-y-flasheo.md` — la IP va por `HERMES_SERVER_IP`, no se edita código. Ojo: las dependencias están fijadas con `^`, así que un build futuro puede no dar el mismo binario; por eso existe el respaldo del `.bin` |
 | Conexionado | `docs/conexionado-por-componente.md` |
 
@@ -75,11 +76,21 @@ eso es de esta VM. Para hablarle: POST a `/v1/chat/completions` en
 cd ~/Proyectos/experimentos/hermes-bridge        # en la Mac mini
 .venv/bin/python3 tests/test_barge_state.py      # máquina de estados, segundos
 .venv/bin/python3 tests/check_barge_contract.py  # contrato firmware↔bridge
+.venv/bin/python3 tests/test_long_task_and_auth.py  # tareas largas + claves (34/34)
 ```
 
 `check_barge_contract.py` da **18/20 y está bien así**: los 2 FAIL son del propio
 checker, que quedó viejo el 2026-09-15 al agregarse el `via`. Compará siempre
 contra el respaldo antes de culpar a un cambio nuevo.
+
+Para probar un `bridge.py` nuevo **sin tocar producción**: copiar el directorio
+a `/tmp/hb-test` (sin `.venv`), poner ahí el archivo nuevo, enlazar `docs/` (lo
+necesita `check_barge_contract.py`) y correr con el `.venv` de producción.
+
+**Claves:** las crea Carlos con `devices_admin.py` (se muestran una sola vez y
+no deben pasar por el chat). Si un agente necesita usar una clave que solo
+está en un archivo (como el JWT viejo del respaldo), que el script la lea y la
+mande sin imprimirla.
 
 `tests/test_barge_in.py` (integración con audio real) **no corre**: falta
 `ffmpeg` en la Mac mini.
