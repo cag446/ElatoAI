@@ -100,23 +100,32 @@ cambiar los `^` por versiones exactas en `platformio.ini`.
 
 En el home del usuario hay varios juegos de respaldos. **No son intercambiables.**
 
-### ⚠️ El firmware que corre hoy (2026-10-09) NO tiene respaldo empaquetado
+### ✅ Con barge-in y clave del bridge (2026-10-09) — ESTE ES EL VIGENTE
 
-Desde el 2026-10-08 el parlante corre un firmware **posterior** al respaldo del
-09-24: agrega el recuadro "Clave del bridge" en el portal (`POST
-/api/wifi/token`) y baja `CORE_DEBUG_LEVEL` a 1 (commits `3b3846c` y `a170fc5`).
-Se reconstruye desde el fork con la Opcion A. Falta regenerar el paquete de
-respaldo con este binario.
+`~/elatoai-firmware-respaldo-2026-10-09.{tar.gz,zip}`, y copia fuera de la VM
+en la Mac mini (`~/Respaldos/elatoai/`; SHA-256 del `.tar.gz` comparado igual
+en las dos el 2026-10-09).
 
-**Antes de restaurar el respaldo del 09-24, leer esto:**
+Binario del commit `a170fc5` (compilado 2026-10-09 00:09 con
+`HERMES_SERVER_IP=192.168.100.23`), el mismo que se grabo y verifico en el
+parlante a las 00:13. Agrega al del 09-24 el recuadro "Clave del bridge" en el
+portal y `CORE_DEBUG_LEVEL=1`.
 
-- Su binario merged cubre `0x0`–`0x3F0000` y trae la zona NVS (`0x9000`–`0xE000`)
-  **en blanco** (verificado 2026-10-09): grabarlo **borra la WiFi y la clave**
-  guardadas en la placa.
-- Ese firmware no tiene el recuadro de la clave: con la NVS vacia pide clave a
-  `GET :3000/api/generate_auth_token`, que en modo `enforce` da 404. **El
-  parlante no podria conectarse.** Para usarlo hay que poner antes el bridge en
-  `BRIDGE_AUTH_MODE=transition` (ver `claves-y-tareas-largas.md`).
+**`flash.sh` tiene dos modos** (el del 09-24 tenia uno solo, que borraba todo):
+
+- `./flash.sh` — **conserva la WiFi y la clave**: graba bootloader,
+  particiones, otadata y app en sus offsets, sin tocar la NVS (0x9000–0xE000).
+  Es lo mismo que hace `pio run -t upload`.
+- `./flash.sh --desde-cero` — graba el merged en 0x0 y **borra la WiFi y la
+  clave** (pide confirmar). El `LEEME.md` explica como volver a cargarlas.
+
+El script en si no se corrio contra la placa; lo que graba el modo normal es lo
+mismo que `pio`, que si se verifico.
+
+> ⚠️ **El respaldo del 09-24 es anterior a las claves.** Su firmware no puede
+> cargar una clave y su merged trae la NVS en blanco (verificado): restaurarlo
+> borra WiFi y clave y, con el bridge en `enforce`, el parlante **no conecta**
+> (habria que pasar el bridge a `transition`; ver `claves-y-tareas-largas.md`).
 
 Respaldo de la flash **completa** tal como estaba antes del flasheo del
 2026-10-08 (incluye NVS con la WiFi y el JWT viejo de Elato; no copiarlo a otros
@@ -124,7 +133,7 @@ lados): `~/elatoai-flash-previo-2026-10-08_210441/flash-completo.bin` (4 MB,
 `SHA256SUMS` al lado). Grabarlo en `0x0` deja la placa exactamente como estaba
 ese dia.
 
-### ✅ Con barge-in (2026-09-24) — ultimo respaldo empaquetado
+### Con barge-in (2026-09-24) — historico, SIN clave del bridge
 
 `~/elatoai-firmware-respaldo-2026-09-24.{tar.gz,zip}`, y copia fuera de la VM en
 la Mac mini (`~/Respaldos/elatoai/`).
@@ -293,9 +302,12 @@ OFFSETS (ESP32-S3):
   0x10000  firmware.bin        <- la app
 
 RESPALDOS (~/):
+  [Con barge-in + clave del bridge, 2026-10-09 — EL VIGENTE]
+  elatoai-firmware-respaldo-2026-10-09/   -> ./flash.sh (conserva NVS)
+                                             ./flash.sh --desde-cero (borra NVS)
   [Flash completa previa al 2026-10-08 — incluye NVS]
   elatoai-flash-previo-2026-10-08_210441/flash-completo.bin  -> todo, offset 0x0
-  [Con barge-in, 2026-09-24 — ultimo paquete; SIN clave del bridge]
+  [Con barge-in, 2026-09-24 — historico; SIN clave del bridge]
   elatoai-firmware-respaldo-2026-09-24/   -> flash.sh (merged a 0x0, BORRA NVS)
   [Hermes bridge 2026-07-18 — historica, SIN barge-in]
   ElatoAI_ESP32_S3_Bridge.py.bin         -> app sola, offset 0x10000
@@ -311,7 +323,7 @@ FLASHEAR:
 
 SIEMPRE en el Zero: --no-stub (USB nativo). Modo descarga: BOOT + conectar USB-C.
 Tras grabar: desenchufar y enchufar SIN BOOT para que arranque.
-Firmware de HOY (con clave del bridge): reconstruir desde el fork (Opcion A).
-OJO: el merged del 09-24 borra la NVS (WiFi + clave) y no funciona con el
-bridge en modo enforce.
+Firmware de HOY: respaldo 2026-10-09, o reconstruir desde el fork (Opcion A).
+OJO: el merged (de cualquier respaldo) borra la NVS (WiFi + clave); el del
+09-24 ademas no funciona con el bridge en modo enforce.
 ```

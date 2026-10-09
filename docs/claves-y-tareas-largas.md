@@ -214,6 +214,7 @@ del proveedor), turnos cortos, el historial, las claves y los dos modos.
 |---|---|
 | Aceptar aparatos sin clave | `BRIDGE_AUTH_MODE=transition` en el plist + reiniciar |
 | Volver a prohibir tareas por voz | restaurar `com.elato.hermes-bridge.plist.bak-2026-10-08_234337` (instrucciones viejas, ya en `enforce`). El `…_224156` es anterior: instrucciones viejas **y** modo `transition` |
+| Regrabar el firmware actual del parlante | `~/elatoai-firmware-respaldo-2026-10-09/flash.sh` (conserva WiFi y clave; copia en la Mac mini, `~/Respaldos/elatoai/`) |
 | Firmware anterior del parlante | `~/elatoai-flash-previo-2026-10-08_210441/flash-completo.bin` (4 MB, **incluye la WiFi y el JWT viejo**: no copiarlo a otros lados) |
 | Firmware anterior del Cardputer | `~/cardputer-flash-previo-2026-10-08_213032/flash-completo.bin` (8 MB, idem) |
 
