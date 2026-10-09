@@ -374,11 +374,34 @@ async def ask_hermes(http: ClientSession, history: list[dict]) -> tuple[str, flo
         return text, time.monotonic() - t0
 
 
-async def ask_hermes_stream(http: ClientSession, history: list[dict]):
+def explain_hermes_error(msg: str) -> str:
+    """Causa legible de un fallo que Hermes informa en el ultimo chunk del SSE.
+
+    Hermes cierra el stream con `finish_reason: "error"` y `"error": {"message":
+    ...}` (api_server_openai_routes.py), sin texto. El mensaje crudo es el del
+    proveedor; traducimos los casos vistos y dejamos el resto recortado.
+    """
+    low = msg.lower()
+    if "content exists risk" in low:
+        return ("el modelo (DeepSeek) rechazo el contenido por su filtro: suele "
+                "pasar con temas politicos o sensibles. Proba reformularlo o pedirlo "
+                "por Telegram con otro modelo.")
+    if "insufficient balance" in low or "error code: 402" in low:
+        return "el modelo (DeepSeek) se quedo sin saldo: hay que recargar la cuenta."
+    if "rate limit" in low or "error code: 429" in low:
+        return "el modelo esta limitando pedidos (demasiados seguidos). Proba en un rato."
+    return "Hermes informo un error: " + msg[:250]
+
+
+async def ask_hermes_stream(http: ClientSession, history: list[dict], on_error=None):
     """Stream Hermes response token by token (OpenAI SSE format).
 
     Yields content strings as they arrive from the model, so the caller
     can start TTS on the first sentence without waiting for the full reply.
+
+    Si Hermes cierra informando un error (chunk final con "error"), se llama a
+    `on_error(mensaje)` y el stream termina normal: NO se lanza excepcion, para
+    no cambiar como termina un turno corto en el parlante.
     """
     payload = {
         "model": HERMES_MODEL,
@@ -409,6 +432,9 @@ async def ask_hermes_stream(http: ClientSession, history: list[dict]):
                     break
                 try:
                     chunk = json.loads(data)
+                    err = chunk.get("error") if isinstance(chunk, dict) else None
+                    if err and on_error is not None:
+                        on_error(err.get("message", "") if isinstance(err, dict) else str(err))
                     delta = chunk["choices"][0]["delta"]
                     content = delta.get("content", "")
                     if content:
@@ -436,11 +462,16 @@ class HermesPump:
         self._q: asyncio.Queue = asyncio.Queue()
         self._parts: list[str] = []
         self.error: Exception | None = None
+        self.hermes_error: str | None = None   # causa que Hermes informo al cerrar (ver explain_hermes_error)
         self.task = asyncio.create_task(self._run(http, history))
+
+    def _on_hermes_error(self, msg: str):
+        self.hermes_error = msg
+        log.warning("Hermes cerro con error: %s", msg[:300])
 
     async def _run(self, http: ClientSession, history: list[dict]):
         try:
-            async for tok in ask_hermes_stream(http, history):
+            async for tok in ask_hermes_stream(http, history, on_error=self._on_hermes_error):
                 self._parts.append(tok)
                 self._q.put_nowait(tok)
         except asyncio.CancelledError:
@@ -529,6 +560,8 @@ async def _finish_long_task(pump: "HermesPump", user_text: str, mac: str, sessio
     body = full.strip() or None
     if err is not None:
         body = None
+    if body is None and err is None and pump.hermes_error:
+        err = RuntimeError(explain_hermes_error(pump.hermes_error))
     log.info("[tarea larga] termino %.0f s despues del aviso — %s",
              time.monotonic() - t0,
              ("%d chars, enviando a Telegram" % len(body)) if body else "SIN resultado (%s)" % err)

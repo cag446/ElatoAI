@@ -91,7 +91,10 @@ async def fake_hermes(request):
     if modo == "rapido":
         for t in ["Hola. ", "Todo ", "bien."]:
             await resp.write(chunk({"content": t})); await asyncio.sleep(0.05)
-    elif modo in ("lento", "lento_vacio"):
+    elif modo == "corto_error":
+        # Pregunta corta que Hermes cierra con error y sin texto.
+        pass
+    elif modo in ("lento", "lento_vacio", "lento_error"):
         # Igual que Hermes usando herramientas: keepalives y progreso, SIN texto.
         fin = time.monotonic() + ESCENARIO["demora"]
         while time.monotonic() < fin:
@@ -101,6 +104,13 @@ async def fake_hermes(request):
         if modo == "lento":
             for t in ["Resultado final ", "de la tarea larga."]:
                 await resp.write(chunk({"content": t})); await asyncio.sleep(0.05)
+    if modo in ("lento_error", "corto_error"):
+        # Como Hermes cuando el proveedor rechaza (api_server_openai_routes.py):
+        # chunk final con finish_reason "error" y el mensaje crudo del proveedor.
+        fin = {"choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+               "error": {"message": "Error code: 400 - {'error': {'message': 'Content Exists Risk (request_id: x)'}}",
+                         "type": "BadRequestError"}}
+        await resp.write(("data: " + json.dumps(fin) + "\n\n").encode())
     await resp.write(b"data: [DONE]\n\n")
     return resp
 
@@ -213,6 +223,31 @@ async def main():
         await esperar_tareas_largas()
         txt = SENT.read_text(encoding="utf-8")
         check("tarea sin resultado: igual avisa por Telegram", "No se pudo completar" in txt, txt[:120].replace("\n", " | "))
+
+        print("=== WS (ESP32): tarea larga que Hermes cierra con error del proveedor ===")
+        SENT.write_text("")
+        ESCENARIO.update(modo="lento_error", demora=3)
+        TEXTO_USUARIO["v"] = "posts de alguien"
+        ws = FakeWS(); s = bridge.Session(ws, http, "AA:BB:CC:DD:EE:03")
+        await s.greet()
+        await s.process_utterance(b"\x00\x00" * 16000)
+        await esperar_tareas_largas()
+        txt = SENT.read_text(encoding="utf-8")
+        check("error del proveedor: Telegram dice la CAUSA", "rechazo el contenido por su filtro" in txt,
+              txt[:160].replace("\n", " | "))
+        check("error del proveedor: ya no dice 'no devolvio texto'", "no devolvio texto" not in txt)
+
+        print("=== WS (ESP32): pregunta corta que Hermes cierra con error ===")
+        SENT.write_text("")
+        ESCENARIO.update(modo="corto_error", demora=0)
+        TEXTO_USUARIO["v"] = "pregunta corta"
+        ws = FakeWS(); s = bridge.Session(ws, http, "AA:BB:CC:DD:EE:04")
+        await s.greet()
+        await s.process_utterance(b"\x00\x00" * 16000)
+        check("corta con error: no dispara tarea larga ni Telegram", not bridge._LONG_TASKS and SENT.read_text() == "")
+        check("corta con error: termina igual que antes (RESPONSE.COMPLETE)",
+              ws.states() and ws.states()[-1] == "RESPONSE.COMPLETE", ws.states())
+        check("corta con error: el parlante queda libre", not s.turn_lock.locked())
 
         print("=== Claves por dispositivo (con devices_admin.py) ===")
         env = dict(os.environ)
